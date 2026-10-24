@@ -34,7 +34,6 @@ The script attempts to locate the Steam library automatically. You can confirm t
 
 ## Run from PowerShell (IEX)
 
-After `install.ps1` has been committed to the repository's `main` branch, run this command in PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/LarkTheStar/fix-installer/main/install.ps1 | iex
