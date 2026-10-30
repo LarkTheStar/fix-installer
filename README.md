@@ -149,7 +149,7 @@ applies to every script you find online, including this one.
 ## Version
 
 `1.0.0` — the value lives in `$AppVersion` at the top of the script and is shown in the
-sidebar. Keep it in sync with the git tag when you publish a release.
+sidebar.
 
 ## License
 
