@@ -1413,7 +1413,7 @@ function Clear-FixBeforeDowngrade {
     $lines.Add('longer match the install. Before anything else this will:')
     $lines.Add('')
     if ($canRevert) {
-        $lines.Add('  1. restore the originals from the newest backup (revert the fix)')
+        $lines.Add('  1. restore the originals from the oldest backup (revert the fix)')
         $lines.Add('  2. delete the whole "og files" folder, backups included - not reversible')
     } else {
         $lines.Add('  1. delete the whole "og files" folder, backups included - not reversible')
@@ -1512,6 +1512,10 @@ function Download-WithProgress {
                 $lastPercent = $percent
             }
         }
+        # A dropped connection ends the read loop quietly, so check the size here;
+        # otherwise a truncated file would count as a successful download.
+        if ($bytesTotal -le 0) { throw "The server returned an empty download: $Url" }
+        if ($totalBytes -gt 0 -and $bytesTotal -ne $totalBytes) { throw "Download appears incomplete: received $bytesTotal of $totalBytes bytes." }
     } finally { $fileStream.Close(); $stream.Close(); $response.Close(); Write-Progress -Activity $Activity -Completed }
 }
 
@@ -1622,38 +1626,103 @@ function Invoke-SteamDowngrade {
     $steamProcesses = Get-Process -Name steam* -ErrorAction SilentlyContinue
     if ($steamProcesses) { $steamProcesses | Stop-Process -Force; Start-Sleep -Seconds 3; Write-Host "Steam closed." -ForegroundColor Green }
 
-    Write-Host "`nDeleting old Lua files..." -ForegroundColor Yellow
-    foreach ($file in @("1938090.lua", "1938090_25909941.lua")) {
-        $fullPath = Join-Path -Path $plugInDir -ChildPath $file
-        if (Test-Path $fullPath) { Remove-Item -Path $fullPath -Force; Write-Host "Deleted: $file" -ForegroundColor Green }
-    }
-
-    $tempLua = Join-Path -Path $plugInDir -ChildPath $SourceFileName
-    Write-Host "`nDownloading version locked Lua file..." -ForegroundColor Yellow
-    Download-WithProgress -Url $LuaDownloadUrl -OutFile $tempLua -Activity "Downloading version locked Lua file"
-    Rename-Item -Path $tempLua -NewName $TargetFileName -Force
-    Write-Host "Downloaded and renamed to: $TargetFileName" -ForegroundColor Green
-
+    # The old Lua files and this game's depotcache manifests are moved to a temporary
+    # backup instead of being deleted. They are only deleted for good once the new
+    # Lua file and manifests are downloaded and in place; if anything fails first,
+    # they are moved back so Steam is left exactly as it was.
+    $workRoot = Join-Path $env:TEMP ('codhq-downgrade-' + [guid]::NewGuid().ToString('N'))
+    $backupLuaDir = Join-Path $workRoot 'backup\stplug-in'
+    $backupDepotDir = Join-Path $workRoot 'backup\depotcache'
     $depotCacheDir = Join-Path -Path $steamRoot -ChildPath "depotcache"
-    if (Test-Path $depotCacheDir) {
-        Write-Host "`nCleaning old manifests from depotcache to prevent Steam conflicts..." -ForegroundColor Yellow
-        $manifestFiles = Get-ChildItem -Path $depotCacheDir -Filter "*.manifest"
-        $deletedCount = 0
-        foreach ($manifest in $manifestFiles) {
-            foreach ($id in $codDepotIds) {
-                if ($manifest.Name.StartsWith("$($id)_")) { Remove-Item -Path $manifest.FullName -Force; $deletedCount++; break }
+    $newLuaPath = Join-Path -Path $plugInDir -ChildPath $TargetFileName
+    $movedLua = [System.Collections.Generic.List[object]]::new()
+    $movedManifests = [System.Collections.Generic.List[object]]::new()
+    $newLuaPlaced = $false
+    $manifestsMoved = $false
+    $null = New-Item -ItemType Directory -Path $backupLuaDir -Force
+    $null = New-Item -ItemType Directory -Path $backupDepotDir -Force
+
+    try {
+        Write-Host "`nMoving old Lua files to a temporary backup..." -ForegroundColor Yellow
+        foreach ($file in @($TargetFileName, $SourceFileName)) {
+            $fullPath = Join-Path -Path $plugInDir -ChildPath $file
+            if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+                $backupPath = Join-Path $backupLuaDir $file
+                Move-Item -LiteralPath $fullPath -Destination $backupPath -Force -ErrorAction Stop
+                $movedLua.Add([pscustomobject]@{ Original = $fullPath; Backup = $backupPath })
+                Write-Host "Backed up: $file" -ForegroundColor Green
             }
         }
-        Write-Host "Removed $deletedCount old manifest files." -ForegroundColor Green
-    } else { Write-Host "`nDepotcache folder not found. It will be created by extraction." -ForegroundColor Gray }
 
-    $tempZip = Join-Path $env:TEMP "MW4_25909941_manifests.zip"
-    Write-Host "`nDownloading manifests ZIP..." -ForegroundColor Yellow
-    Download-WithProgress -Url $ZipDownloadUrl -OutFile $tempZip -Activity "Downloading manifests ZIP"
-    Write-Host "Extracting downgrade manifests into Steam root: $steamRoot" -ForegroundColor Gray
-    Expand-ZipOverwrite -ZipPath $tempZip -DestinationPath $steamRoot
-    Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
-    Write-Host "Downgrade manifests extracted successfully." -ForegroundColor Green
+        # Downloaded into the work folder, so a failed download never leaves a
+        # partial file in stplug-in.
+        $tempLua = Join-Path $workRoot $SourceFileName
+        Write-Host "`nDownloading version locked Lua file..." -ForegroundColor Yellow
+        Download-WithProgress -Url $LuaDownloadUrl -OutFile $tempLua -Activity "Downloading version locked Lua file"
+        Move-Item -LiteralPath $tempLua -Destination $newLuaPath -Force -ErrorAction Stop
+        $newLuaPlaced = $true
+        Write-Host "Downloaded and installed as: $TargetFileName" -ForegroundColor Green
+
+        if (Test-Path -LiteralPath $depotCacheDir -PathType Container) {
+            Write-Host "`nMoving this game's old manifests from depotcache to a temporary backup..." -ForegroundColor Yellow
+            foreach ($manifest in @(Get-ChildItem -LiteralPath $depotCacheDir -Filter "*.manifest" -File)) {
+                foreach ($id in $codDepotIds) {
+                    if ($manifest.Name.StartsWith("$($id)_")) {
+                        $backupPath = Join-Path $backupDepotDir $manifest.Name
+                        Move-Item -LiteralPath $manifest.FullName -Destination $backupPath -Force -ErrorAction Stop
+                        $movedManifests.Add([pscustomobject]@{ Original = $manifest.FullName; Backup = $backupPath })
+                        break
+                    }
+                }
+            }
+            Write-Host "Moved $($movedManifests.Count) old manifest files to the temporary backup." -ForegroundColor Green
+        } else { Write-Host "`nDepotcache folder not found. It will be created by extraction." -ForegroundColor Gray }
+        $manifestsMoved = $true
+
+        $tempZip = Join-Path $workRoot "MW4_25909941_manifests.zip"
+        Write-Host "`nDownloading manifests ZIP..." -ForegroundColor Yellow
+        Download-WithProgress -Url $ZipDownloadUrl -OutFile $tempZip -Activity "Downloading manifests ZIP"
+        Write-Host "Extracting downgrade manifests into Steam root: $steamRoot" -ForegroundColor Gray
+        Expand-ZipOverwrite -ZipPath $tempZip -DestinationPath $steamRoot
+        Write-Host "Downgrade manifests extracted successfully." -ForegroundColor Green
+    } catch {
+        Write-Warning "The new Lua file or manifests could not be installed. Restoring the previous ones..."
+        $restoreFailed = $false
+        # Remove whatever the new files already put in place. Only files this run
+        # created are touched: an original that was never moved stays where it is.
+        if ($newLuaPlaced -and (Test-Path -LiteralPath $newLuaPath -PathType Leaf)) {
+            try { Remove-Item -LiteralPath $newLuaPath -Force -ErrorAction Stop } catch { $restoreFailed = $true; Write-Warning "Could not remove the new Lua file: $newLuaPath" }
+        }
+        if ($manifestsMoved -and (Test-Path -LiteralPath $depotCacheDir -PathType Container)) {
+            # Every matching manifest was moved out before extraction began, so any
+            # matching one present now came from the new ZIP.
+            foreach ($manifest in @(Get-ChildItem -LiteralPath $depotCacheDir -Filter "*.manifest" -File -ErrorAction SilentlyContinue)) {
+                foreach ($id in $codDepotIds) {
+                    if ($manifest.Name.StartsWith("$($id)_")) {
+                        try { Remove-Item -LiteralPath $manifest.FullName -Force -ErrorAction Stop } catch { $restoreFailed = $true; Write-Warning "Could not remove a new manifest: $($manifest.FullName)" }
+                        break
+                    }
+                }
+            }
+        }
+        foreach ($record in @($movedLua) + @($movedManifests)) {
+            try { Move-Item -LiteralPath $record.Backup -Destination $record.Original -Force -ErrorAction Stop }
+            catch { $restoreFailed = $true; Write-Warning "Could not restore: $($record.Original)" }
+        }
+        if ($restoreFailed) {
+            # Keep the backup so nothing is lost; the user can copy files back by hand.
+            Write-Warning "Some files could not be restored automatically. The backup was kept at: $workRoot"
+        } else {
+            Write-Host "Restored $($movedLua.Count) Lua file(s) and $($movedManifests.Count) manifest file(s)." -ForegroundColor Green
+            Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+
+    # Both downloads succeeded and the new files are in place: the backup is no
+    # longer needed.
+    Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Deleted the temporary backup of the old Lua file and manifests." -ForegroundColor Green
 
     $acfPath = Join-Path -Path $steamRoot -ChildPath "steamapps\$AppManifestFile"
     $acfFixed = $false
@@ -2726,7 +2795,7 @@ function Invoke-SteamDowngrade {
                                 <TextBlock Text="&#xE7A7;" FontFamily="Segoe MDL2 Assets" FontSize="26" Foreground="{DynamicResource Red}" VerticalAlignment="Center" Margin="0,0,20,0"/>
                                 <StackPanel VerticalAlignment="Center">
                                     <TextBlock Text="Remove Fix" FontSize="18" FontWeight="Bold"/>
-                                    <TextBlock Text="Restores the original files from the newest backup in 'og files'." FontSize="13" Foreground="{DynamicResource TextSecondary}" Margin="0,5,0,0" TextWrapping="Wrap"/>
+                                    <TextBlock Text="Restores the original files from the oldest backup in 'og files'." FontSize="13" Foreground="{DynamicResource TextSecondary}" Margin="0,5,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
                             </StackPanel>
                         </Button>

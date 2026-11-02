@@ -32,7 +32,7 @@ No installation, no leftovers: the script is the program.
 | Page | Actions |
 | --- | --- |
 | **Overview** | Shows the detected game folder, installs the fix, opens languages, and a green **Play** card that launches `!start_sp26.bat` |
-| **Fix Installer** | Installs or restores the fix, removes it again from the newest backup |
+| **Fix Installer** | Installs or restores the fix, removes it again from the oldest backup |
 | **Languages** | Installs a language pack, switches the active preset, removes a pack |
 | **Downgrade Version** | Normal or Nuclear downgrade for "Invalid game version" |
 
@@ -56,8 +56,8 @@ elevated, Steam libraries, the folder in use) so a bug report is one file.
 | --- | --- |
 | Your game folder | Replaced files are backed up to a timestamped `og files` folder first; removing the fix restores from it |
 | `%TEMP%` | Downloads are staged there and cleaned up afterwards |
-| `<Steam>\config\stplug-in\1938090.lua` | The downgrade replaces this Lua file with a version-locked copy |
-| `<Steam>\depotcache` | The downgrade deletes **this game's** manifests so Steam re-fetches them |
+| `<Steam>\config\stplug-in\1938090.lua` | The downgrade replaces this Lua file with a version-locked copy. The old one is moved to a temporary backup and only deleted once the new Lua file and manifests are in place; if a download fails, it is put back |
+| `<Steam>\depotcache` | The downgrade replaces **this game's** manifests with the version-locked ones. The old ones are kept in the same temporary backup and restored if a download fails |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\settings.json` | Your saved folder, theme, accent and window state |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\worker.json`, `last-run.json` | Hand-off between the normal window and the administrator window during a downgrade; the first is removed when the run hands back, the second is how the normal window reports the result |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\logs` | The log of an administrator downgrade run, saved automatically before that window closes |
@@ -79,7 +79,7 @@ closes it, installs BetterSteamTools, and finally runs the same steps as the Nor
 downgrade.
 
 **Both downgrades begin by undoing an applied fix.** If `og files` is present, you are
-asked to confirm, the originals are restored from the newest backup, and then the
+asked to confirm, the originals are restored from the oldest backup, and then the
 whole `og files` folder is deleted. The downgrade changes which game version is
 installed, so files and backups made for the old one no longer belong there. Declining
 cancels the downgrade rather than leaving two versions mixed together.
@@ -145,6 +145,23 @@ applies to every script you find online, including this one.
   hands the script to PowerShell as a string, and a leading BOM makes Windows PowerShell
   5.1 fail on the `param` block; the non-English language names are stored as `\uXXXX`
   escapes for exactly this reason.
+
+## Tests
+
+`tests\` holds Pester 5 tests for the parts that work on files: settings, the fix
+install and removal, language packs, the `configs.user.ini` edits, ZIP path checks
+and the downgrade's Lua/manifest backup and restore. Downloads, Steam, services,
+processes and prompts are mocked, so running them touches nothing on your PC.
+
+```powershell
+Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-Tests.ps1
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Xaml.ps1
+```
+
+GitHub Actions runs all of it on every push, under both Windows PowerShell 5.1 and
+PowerShell 7, and also checks that the window layout loads. The window itself, UAC,
+and real Steam still need a manual run before a release.
 
 ## Version
 
