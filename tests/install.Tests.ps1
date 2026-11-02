@@ -293,6 +293,126 @@ Describe 'Fix install and removal' {
         Set-Answers 'y'
         Remove-Fix
         Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+    }
+
+    It 'deletes "og files" after a successful removal' {
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'y'
+        Remove-Fix
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+    }
+
+    It 'keeps "og files" and the fix when the user says no' {
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'n'
+        Remove-Fix
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+    }
+
+    It 'keeps "og files" when the removal fails' {
+        Set-Answers 'y'
+        Install-Fix
+        Mock Download-FileWithProgress { throw 'network down' }
+        Set-Answers 'y'
+        { Remove-Fix } | Should -Throw '*network down*'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+    }
+
+    It 'never deletes "og files" when it is a file instead of a folder' {
+        Set-Content -LiteralPath (Join-Path $game 'og files') -Value 'not a folder'
+        { Remove-FixBackupFolder -TargetRoot $game } | Should -Throw
+        Test-Path -LiteralPath (Join-Path $game 'og files') -PathType Leaf | Should -BeTrue
+    }
+}
+
+Describe 'Reverting the fix before a downgrade' {
+    BeforeEach {
+        $game = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('game-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $game 'a.txt') -Value 'original'
+        $fixZip = Join-Path $TestDrive 'fix.zip'
+        Remove-Item -LiteralPath $fixZip -Force -ErrorAction SilentlyContinue
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed' })
+
+        Mock Select-TargetFolder { $game }
+        Mock Resolve-GameFolderQuiet { $game }
+        Mock Download-FileWithProgress { Copy-Item -LiteralPath $fixZip -Destination $Destination }
+        Mock Get-Service { }
+        Mock Get-Process { }
+        Mock Start-Sleep { }
+        Mock Start-Process { }
+        Mock Write-Host { }
+        Mock Add-LogEntry { }
+        Mock Read-Host { $global:CodhqTestAnswers.Dequeue() }
+    }
+
+    It 'restores the originals and deletes "og files" when confirmed' {
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'y'
+        Clear-FixBeforeDowngrade -Method Normal
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+    }
+
+    It 'cancels the downgrade and changes nothing when declined' {
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'n'
+        { Clear-FixBeforeDowngrade -Method Normal } | Should -Throw -ExceptionType ([System.OperationCanceledException])
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+    }
+
+    It 'deletes an "og files" that holds no usable backup' {
+        $null = New-Item -ItemType Directory -Path (Join-Path $game 'og files\empty') -Force
+        Set-Answers 'y'
+        Clear-FixBeforeDowngrade -Method Normal
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+    }
+
+    It 'does nothing when there is no "og files"' {
+        Clear-FixBeforeDowngrade -Method Normal
+        Should -Invoke Read-Host -Times 0
+    }
+}
+
+Describe 'Temporary copies of the script' {
+    BeforeEach {
+        $temp = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('temp-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        function New-Copy {
+            param([string]$Name, [int]$AgeHours)
+            $path = Join-Path $temp $Name
+            Set-Content -LiteralPath $path -Value 'copy'
+            (Get-Item -LiteralPath $path).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-$AgeHours)
+            $path
+        }
+        $guidName = { 'codhq-setup-' + [guid]::NewGuid().ToString('N') + '.ps1' }
+    }
+
+    It 'recognises only codhq-setup-<guid>.ps1 directly in the temp folder' {
+        Test-IsTempScriptCopy -Path (Join-Path $temp (& $guidName)) -TempDirectory $temp | Should -BeTrue
+        Test-IsTempScriptCopy -Path (Join-Path $temp 'install.ps1') -TempDirectory $temp | Should -BeFalse
+        Test-IsTempScriptCopy -Path (Join-Path $temp 'codhq-setup-notaguid.ps1') -TempDirectory $temp | Should -BeFalse
+        Test-IsTempScriptCopy -Path (Join-Path (Join-Path $temp 'sub') (& $guidName)) -TempDirectory $temp | Should -BeFalse
+        Test-IsTempScriptCopy -Path '' -TempDirectory $temp | Should -BeFalse
+    }
+
+    It 'deletes old copies but keeps recent ones, the running one and unrelated files' {
+        $old = New-Copy -Name (& $guidName) -AgeHours 48
+        $recent = New-Copy -Name (& $guidName) -AgeHours 2
+        $running = New-Copy -Name (& $guidName) -AgeHours 72
+        $unrelated = New-Copy -Name 'codhq-setup-keep.ps1' -AgeHours 72
+        Remove-StaleScriptCopies -KeepPath $running -TempDirectory $temp | Should -Be 1
+        Test-Path -LiteralPath $old | Should -BeFalse
+        Test-Path -LiteralPath $recent | Should -BeTrue
+        Test-Path -LiteralPath $running | Should -BeTrue
+        Test-Path -LiteralPath $unrelated | Should -BeTrue
     }
 }
 

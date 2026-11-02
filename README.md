@@ -32,7 +32,7 @@ No installation, no leftovers: the script is the program.
 | Page | Actions |
 | --- | --- |
 | **Overview** | Shows the detected game folder, installs the fix, opens languages, and a green **Play** card that launches `!start_sp26.bat` |
-| **Fix Installer** | Installs or restores the fix, removes it again from the oldest backup |
+| **Fix Installer** | Installs or restores the fix, removes it again from the oldest backup, then deletes `og files` |
 | **Languages** | Installs a language pack, switches the active preset, removes a pack |
 | **Downgrade Version** | Normal or Nuclear downgrade for "Invalid game version" |
 
@@ -54,7 +54,7 @@ elevated, Steam libraries, the folder in use) so a bug report is one file.
 
 | Location | Why |
 | --- | --- |
-| Your game folder | Replaced files are backed up to a timestamped `og files` folder first; removing the fix restores from it |
+| Your game folder | Replaced files are backed up to a timestamped `og files` folder first; removing the fix restores from the oldest one and then deletes `og files` |
 | `%TEMP%` | Downloads are staged there and cleaned up afterwards |
 | `<Steam>\config\stplug-in\1938090.lua` | The downgrade replaces this Lua file with a version-locked copy. The old one is moved to a temporary backup and only deleted once the new Lua file and manifests are in place; if a download fails, it is put back |
 | `<Steam>\depotcache` | The downgrade replaces **this game's** manifests with the version-locked ones. The old ones are kept in the same temporary backup and restored if a download fails |
@@ -62,10 +62,11 @@ elevated, Steam libraries, the folder in use) so a bug report is one file.
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\worker.json`, `last-run.json` | Hand-off between the normal window and the administrator window during a downgrade; the first is removed when the run hands back, the second is how the normal window reports the result |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\logs` | The log of an administrator downgrade run, saved automatically before that window closes |
 
-Nothing else is written outside those paths, and older backups are never deleted on
-their own, so you can always step further back. The one exception is a downgrade: it
-deletes `og files` deliberately (see below), because backups of the other version are
-worse than useless.
+Nothing else is written outside those paths. `og files` is deleted only after its
+originals have been put back: by **Remove fix** once every file is restored, and at
+the start of a downgrade (see below). If any file fails to restore, nothing is
+deleted. Downloaded copies of the utility in `%TEMP%` (`codhq-setup-*.ps1`) are
+deleted when the window closes; any left by a crash are removed a day later.
 
 **Network access:** GitHub releases (fix archive and downgrade manifests) and
 `ps.lua.tools` (only during the Nuclear downgrade, to install BetterSteamTools).
@@ -160,8 +161,20 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Xaml.ps1
 ```
 
 GitHub Actions runs all of it on every push, under both Windows PowerShell 5.1 and
-PowerShell 7, and also checks that the window layout loads. The window itself, UAC,
-and real Steam still need a manual run before a release.
+PowerShell 7, and also checks that the window layout loads.
+
+`tests\Test-Gui.ps1` starts the real window from a temp copy and drives it with UI
+Automation: every page, the theme and accent switches, the activity log, and the
+cleanup of temp copies. It needs a desktop session, so it runs on your PC only, and
+the mouse moves while it clicks the sidebar. It presses no action buttons and puts
+`settings.json` back afterwards.
+
+```powershell
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Gui.ps1
+```
+
+UAC, the administrator hand-back and real Steam still need a manual run before a
+release.
 
 ## Version
 

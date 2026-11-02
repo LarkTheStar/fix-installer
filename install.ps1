@@ -39,6 +39,36 @@ function ConvertTo-ScriptText {
     return ([string]$Content).TrimStart([char]0xFEFF)
 }
 
+# "irm ... | iex" saves a copy of this script as %TEMP%\codhq-setup-<guid>.ps1 and
+# runs that. Only those copies may ever be deleted by the cleanup below, never a
+# file the user downloaded and started themselves.
+function Test-IsTempScriptCopy {
+    param([string]$Path, [string]$TempDirectory = [IO.Path]::GetTempPath())
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($TempDirectory)) { return $false }
+    try {
+        $full = [IO.Path]::GetFullPath($Path)
+        $temp = [IO.Path]::GetFullPath($TempDirectory).TrimEnd('\', '/')
+    } catch { return $false }
+    if (-not [string]::Equals([IO.Path]::GetDirectoryName($full).TrimEnd('\', '/'), $temp, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return ([IO.Path]::GetFileName($full) -match '^codhq-setup-[0-9a-f]{32}\.ps1$')
+}
+
+# Copies left by earlier runs. A window deletes its own copy when it closes, so these
+# are only left behind by crashes or a killed process. Anything younger than a day
+# is skipped, because another window may still be running from it.
+function Remove-StaleScriptCopies {
+    param([string]$KeepPath, [string]$TempDirectory = [IO.Path]::GetTempPath(), [TimeSpan]$OlderThan = [TimeSpan]::FromDays(1))
+    $cutoff = [DateTime]::UtcNow - $OlderThan
+    $removed = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $TempDirectory -Filter 'codhq-setup-*.ps1' -File -ErrorAction SilentlyContinue)) {
+        if (-not (Test-IsTempScriptCopy -Path $file.FullName -TempDirectory $TempDirectory)) { continue }
+        if ($KeepPath -and [string]::Equals($file.FullName, [IO.Path]::GetFullPath($KeepPath), [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($file.LastWriteTimeUtc -gt $cutoff) { continue }
+        try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop; $removed++ } catch { }
+    }
+    return $removed
+}
+
 # ==========================================
 # BOOTSTRAP (own process + STA + a real file)
 # ==========================================
@@ -92,6 +122,13 @@ if ($needsOwnProcess -or $needsSta) {
     }
     # Could not prepare a relaunch: fall through and try to run here instead.
 }
+
+# This is the process that shows the window. Keep the script text in memory: if the
+# temp copy disappears while the window is open (another run's cleanup, or a temp
+# cleaner), the administrator relaunch writes it back from here.
+$global:ScriptSourceText = ''
+if (-not [string]::IsNullOrWhiteSpace($global:ScriptPath)) { $global:ScriptSourceText = $ownSource }
+if (-not $RunDowngradeOnly) { $null = Remove-StaleScriptCopies -KeepPath $global:ScriptPath }
 
 # ==========================================
 # HIDE THE CONSOLE WINDOW (GUI ONLY)
@@ -315,7 +352,7 @@ function Get-SteamLibraries {
 }
 
 function Find-CallOfDutyHQ {
-    $matches = [System.Collections.Generic.List[string]]::new()
+    $found = [System.Collections.Generic.List[string]]::new()
     foreach ($library in (Get-SteamLibraries)) {
         $manifest = Join-Path $library "steamapps\appmanifest_$AppId.acf"
         if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { continue }
@@ -326,10 +363,10 @@ function Find-CallOfDutyHQ {
         if ([IO.Path]::IsPathRooted($installDir) -or $installDir.Contains('..') -or $installDir.Contains(':')) { continue }
         $candidate = [IO.Path]::GetFullPath((Join-Path $library "steamapps\common\$installDir"))
         if (Test-Path -LiteralPath $candidate -PathType Container) {
-            if (-not ($matches | Where-Object { $_.Equals($candidate, [StringComparison]::OrdinalIgnoreCase) })) { $matches.Add($candidate) }
+            if (-not ($found | Where-Object { $_.Equals($candidate, [StringComparison]::OrdinalIgnoreCase) })) { $found.Add($candidate) }
         }
     }
-    return $matches.ToArray()
+    return $found.ToArray()
 }
 
 # ------------------------------------------
@@ -866,18 +903,18 @@ function Get-ConfigLanguageValue {
     param([Parameter(Mandatory)][string]$IniPath)
     if (-not (Test-Path -LiteralPath $IniPath -PathType Leaf)) { throw "Configuration file not found: $IniPath" }
     $content = [IO.File]::ReadAllText($IniPath)
-    $matches = [regex]::Matches($content, '(?im)^[ \t]*language[ \t]*=[ \t]*(.*?)[ \t]*\r?$')
-    if ($matches.Count -ne 1) { throw "Expected exactly one existing language= line in '$IniPath'; found $($matches.Count). The file was not changed." }
-    return $matches[0].Groups[1].Value.Trim()
+    $languageLines = [regex]::Matches($content, '(?im)^[ \t]*language[ \t]*=[ \t]*(.*?)[ \t]*\r?$')
+    if ($languageLines.Count -ne 1) { throw "Expected exactly one existing language= line in '$IniPath'; found $($languageLines.Count). The file was not changed." }
+    return $languageLines[0].Groups[1].Value.Trim()
 }
 
 function Set-ConfigLanguageValue {
     param([Parameter(Mandatory)][string]$IniPath, [Parameter(Mandatory)][string]$Language)
     if (-not (Test-Path -LiteralPath $IniPath -PathType Leaf)) { throw "Configuration file not found: $IniPath" }
     $content = [IO.File]::ReadAllText($IniPath)
-    $matches = [regex]::Matches($content, '(?im)^[ \t]*language[ \t]*=[^\r\n]*')
-    if ($matches.Count -ne 1) { throw "Expected exactly one existing language= line in '$IniPath'; found $($matches.Count). The file was not changed." }
-    $m = $matches[0]
+    $languageLines = [regex]::Matches($content, '(?im)^[ \t]*language[ \t]*=[^\r\n]*')
+    if ($languageLines.Count -ne 1) { throw "Expected exactly one existing language= line in '$IniPath'; found $($languageLines.Count). The file was not changed." }
+    $m = $languageLines[0]
     $updated = $content.Substring(0, $m.Index) + "language=$Language" + $content.Substring($m.Index + $m.Length)
     $tempIni = "$IniPath.$([guid]::NewGuid().ToString('N')).tmp"
     try {
@@ -1152,6 +1189,9 @@ function Install-LanguagePack {
         Write-Info "Active language set to '$($pack.Value)'."
         Write-Info "Installed files owned by this pack: $($planned.Count)."
     } catch {
+        # Already saved as installed: rolling files back now would leave state.json
+        # describing files that are gone, so report the error and keep the install.
+        if ($committed) { throw }
         Write-Warn 'Language-pack installation failed. Attempting to roll back newly written files and configuration...'
         for ($i = $undo.Count - 1; $i -ge 0; $i--) {
             $record = $undo[$i]
@@ -1331,7 +1371,7 @@ function Remove-Fix {
     $backupRoot = $candidate.Directory.FullName
     Write-Warn "Selected original-file backup: $backupRoot"
     if (-not $SkipPrompt) {
-        $confirm = Read-Host "Selected backup:`n$backupRoot`n`nRemove the fix and restore originals? [y/N]"
+        $confirm = Read-Host "Selected backup:`n$backupRoot`n`nRemove the fix, restore the originals from this backup, and then delete the whole ""og files"" folder? [y/N]"
         if ($confirm -notmatch '^(y|yes)$') { Write-Info 'Fix removal cancelled.'; return }
     }
     $workRoot = Join-Path $env:TEMP ('codhq-fix-removal-' + [guid]::NewGuid().ToString('N'))
@@ -1368,6 +1408,24 @@ function Remove-Fix {
         if ($archive) { try { $archive.Dispose() } catch {} }
         if (Test-Path -LiteralPath $workRoot) { Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
+    # Every file was restored (any failure above throws before this point), so the
+    # backups have done their job. Newer backups hold fix files rather than
+    # originals, so none of them are worth keeping once the fix is gone.
+    Remove-FixBackupFolder -TargetRoot $targetRoot
+}
+
+# Deletes "og files" under the game folder. Guarded: exactly an "og files" directory
+# directly under the game folder, and never a link, so a stray path cannot be wiped.
+function Remove-FixBackupFolder {
+    param([Parameter(Mandatory)][string]$TargetRoot)
+    $backupBase = Join-Path $TargetRoot 'og files'
+    if ((Split-Path -Leaf $backupBase) -ne 'og files') { throw "Refusing to delete an unexpected path: $backupBase" }
+    $item = Get-Item -LiteralPath $backupBase -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    if (-not $item.PSIsContainer) { throw "Refusing to delete something that is not a folder: $backupBase" }
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing to delete a linked folder: $backupBase" }
+    Remove-Item -LiteralPath $backupBase -Recurse -Force -ErrorAction Stop
+    Write-Ok ('Deleted "og files" and every backup inside it: ' + $backupBase)
 }
 
 # Resolves the game folder without ever opening a picker: a downgrade should not be
@@ -1434,21 +1492,13 @@ function Clear-FixBeforeDowngrade {
         Write-Warn 'No usable backup was found in "og files"; only the folder itself will be removed.'
     }
 
-    # Delete the backups. Guarded: exactly an "og files" directory directly under
-    # the game folder, and never a link, so a stray path cannot be wiped.
-    if ((Split-Path -Leaf $backupBase) -ne 'og files') { throw "Refusing to delete an unexpected path: $backupBase" }
-    $item = Get-Item -LiteralPath $backupBase -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item) {
-        Write-Ok '"og files" is already gone.'
-        return
-    }
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing to delete a linked folder: $backupBase" }
+    # Remove-Fix already deletes "og files" after a successful restore; this covers
+    # the case where there was no usable backup to restore from.
     try {
-        Remove-Item -LiteralPath $backupBase -Recurse -Force -ErrorAction Stop
+        Remove-FixBackupFolder -TargetRoot $targetRoot
     } catch {
         throw ('The downgrade was not started because "og files" could not be deleted: ' + $_.Exception.Message)
     }
-    Write-Ok ('Deleted "og files" and every backup inside it: ' + $backupBase)
 }
 
 function Launch-BatchFile {
@@ -2795,7 +2845,7 @@ function Invoke-SteamDowngrade {
                                 <TextBlock Text="&#xE7A7;" FontFamily="Segoe MDL2 Assets" FontSize="26" Foreground="{DynamicResource Red}" VerticalAlignment="Center" Margin="0,0,20,0"/>
                                 <StackPanel VerticalAlignment="Center">
                                     <TextBlock Text="Remove Fix" FontSize="18" FontWeight="Bold"/>
-                                    <TextBlock Text="Restores the original files from the oldest backup in 'og files'." FontSize="13" Foreground="{DynamicResource TextSecondary}" Margin="0,5,0,0" TextWrapping="Wrap"/>
+                                    <TextBlock Text="Restores the original files from the oldest backup in 'og files', then deletes 'og files'." FontSize="13" Foreground="{DynamicResource TextSecondary}" Margin="0,5,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
                             </StackPanel>
                         </Button>
@@ -4090,6 +4140,9 @@ function Run-Action {
         return
     }
     $global:IsProcessing = $true
+    # Numbered lines an earlier action printed but never asked about must not turn
+    # up as options in this action's first prompt.
+    $global:AvailableOptions = @()
     $actionFailed = $false
     $actionCancelled = $false
     $actionButtons = @("BtnQuickFix", "BtnQuickLang", "BtnChooseFolder", "BtnLaunchBat", "BtnInstallFix", "BtnRemoveFix",
@@ -4338,11 +4391,21 @@ Run the Nuclear downgrade now? [y/N]
         return
     }
 
-    Clear-Log
+    # No Clear-Log here: Run-Action cleared the log when this action started, and
+    # clearing again would wipe the Nuclear confirmation logged above.
     Add-LogEntry -Text ('[WARN] Administrator privileges are required for the ' + $Method + ' downgrade. Accept the UAC prompt to continue.') -Color '#FFD700'
     $scriptPath = $global:ScriptPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
         Add-LogEntry -Text '[WARN] Cannot relaunch as administrator: the path of this script is unknown. Start PowerShell as administrator and run the file again.' -Color '#FFD700'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf) -and (Test-ScriptSourceLooksComplete $global:ScriptSourceText)) {
+        # The temp copy was removed while this window was open; write it back from
+        # the text loaded at startup so the elevated relaunch has a file to run.
+        try { [IO.File]::WriteAllText($scriptPath, $global:ScriptSourceText, [Text.UTF8Encoding]::new($false)) } catch { }
+    }
+    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+        Add-LogEntry -Text ('[WARN] Cannot relaunch as administrator: the script file is missing: ' + $scriptPath + '. Run the utility again.') -Color '#FFD700'
         return
     }
     try {
@@ -4563,3 +4626,11 @@ foreach ($helper in @(Get-ChildItem -Path Function:)) {
 }
 
 $window.ShowDialog() | Out-Null
+
+# The window is closed: its temp copy is no longer needed. An administrator window
+# still running from it has already loaded the script, so deleting it is safe. That
+# administrator window never deletes it itself, because the window that started it
+# may need it for another downgrade.
+if (-not $RunDowngradeOnly -and (Test-IsTempScriptCopy -Path $global:ScriptPath)) {
+    Remove-Item -LiteralPath $global:ScriptPath -Force -ErrorAction SilentlyContinue
+}
