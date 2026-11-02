@@ -26,11 +26,13 @@ $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader
 Write-Output "Window layout loaded: '$($window.Title)'"
 
 # Names the script looks up: FindName('X') calls, plus the button/page name lists it
-# loops over (Btn*, Nav*, Page*, LogFilter*).
+# loops over (Btn*, Nav*, Page*, LogFilter*). Only the code is scanned, not the XAML
+# itself, whose style keys and group names look the same but are not controls.
+$codeText = $scriptText.Remove($xamlAssignment.Extent.StartOffset, $xamlAssignment.Extent.EndOffset - $xamlAssignment.Extent.StartOffset)
 $names = [System.Collections.Generic.SortedSet[string]]::new()
-foreach ($match in [regex]::Matches($scriptText, 'FindName\(\s*[''"](\w+)[''"]\s*\)')) { [void]$names.Add($match.Groups[1].Value) }
-foreach ($match in [regex]::Matches($scriptText, '[''"]((?:Btn|Nav|Page|LogFilter)[A-Z]\w*)[''"]')) { [void]$names.Add($match.Groups[1].Value) }
-foreach ($match in [regex]::Matches($scriptText, '\b(Accent(?:Steam|Teal|Violet|Amber|Crimson))\s*=')) { [void]$names.Add($match.Groups[1].Value) }
+foreach ($match in [regex]::Matches($codeText, 'FindName\(\s*[''"](\w+)[''"]\s*\)')) { [void]$names.Add($match.Groups[1].Value) }
+foreach ($match in [regex]::Matches($codeText, '[''"]((?:Btn|Nav|Page|LogFilter)[A-Z]\w*)[''"]')) { [void]$names.Add($match.Groups[1].Value) }
+foreach ($match in [regex]::Matches($codeText, '\b(Accent(?:Steam|Teal|Violet|Amber|Crimson))\s*=')) { [void]$names.Add($match.Groups[1].Value) }
 
 $missing = @($names | Where-Object { $null -eq $window.FindName($_) })
 Write-Output "Checked $($names.Count) control names."

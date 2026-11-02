@@ -10,7 +10,7 @@ jobs:
     name: Windows (PowerShell 5.1 and 7)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Windows PowerShell 5.1 is what most people run the utility with, so the parse
       # check uses it, not PowerShell 7.
