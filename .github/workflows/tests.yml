@@ -48,3 +48,10 @@ jobs:
         if: always()
         shell: powershell
         run: powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Xaml.ps1
+
+      # Starts the real window and drives it with UI Automation (no action button is
+      # pressed). GitHub's Windows runners have a desktop session, so this runs here too.
+      - name: Window works (UI Automation)
+        if: always()
+        shell: powershell
+        run: powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Gui.ps1
