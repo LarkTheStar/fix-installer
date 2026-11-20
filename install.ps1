@@ -761,6 +761,9 @@ function Install-Fix {
             $targetPath = [IO.Path]::GetFullPath((Join-Path $targetRootFull $relative))
             $targetPrefix = $targetRootFull + [IO.Path]::DirectorySeparatorChar
             if (-not $targetPath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) { Stop-Installer "ZIP path escapes the game folder: $($entry.FullName)" }
+            # The backup record shares the backup folder with the backed-up files, so a
+            # ZIP file of the same name would overwrite it.
+            if ($relative -ieq (Get-FixBackupRecordName)) { Stop-Installer "ZIP contains a file name the installer reserves for its backup record: $($entry.FullName)" }
             $planned.Add([pscustomobject]@{ Relative = $relative; StagePath = $stagePath; TargetPath = $targetPath; Entry = $entry })
         }
         if ($planned.Count -eq 0) { Stop-Installer 'The ZIP contains no files to install.' }
@@ -777,12 +780,14 @@ function Install-Fix {
         $archive.Dispose()
         $archive = $null
         $backupBase = Join-Path $targetRoot 'og files'
-        if (Test-Path -LiteralPath $backupBase) {
+        $backupBaseExisted = Test-Path -LiteralPath $backupBase
+        if ($backupBaseExisted) {
             $backupBaseItem = Get-Item -LiteralPath $backupBase -Force
             if (-not $backupBaseItem.PSIsContainer -or (($backupBaseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { Stop-Installer "The reserved backup path is not a normal directory: $backupBase" }
         }
         $backupRoot = Join-Path $backupBase ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         $createdTargets = [System.Collections.Generic.List[string]]::new()
+        $createdRelatives = [System.Collections.Generic.List[string]]::new()
         $backedUpTargets = [System.Collections.Generic.List[object]]::new()
         try {
             foreach ($item in $planned) {
@@ -807,16 +812,42 @@ function Install-Fix {
                     $backupParent = Split-Path -Parent $backupPath
                     if (-not (Test-Path -LiteralPath $backupParent -PathType Container)) { New-Item -ItemType Directory -Path $backupParent -Force | Out-Null }
                     Copy-Item -LiteralPath $destination -Destination $backupPath
-                    $backedUpTargets.Add([pscustomobject]@{ Target = $destination; Backup = $backupPath })
-                } else { $createdTargets.Add($destination) }
+                    $backedUpTargets.Add([pscustomobject]@{ Target = $destination; Backup = $backupPath; Relative = $relative })
+                } else { $createdTargets.Add($destination); $createdRelatives.Add($item.Relative) }
                 Copy-Item -LiteralPath $item.StagePath -Destination $destination -Force
             }
+            # Written last, so a record only exists for an install that completed. It
+            # tells Remove Fix exactly which originals this folder holds and which
+            # files the fix added, without guessing from folder age or size.
+            Write-FixBackupRecord -BackupRoot $backupRoot -ReplacedFiles @($backedUpTargets | ForEach-Object { [string]$_.Relative }) -AddedFiles @($createdRelatives)
         } catch {
             Write-Warn 'Installation failed. Attempting to restore replaced files...'
-            foreach ($newFile in $createdTargets) { try { if (Test-Path -LiteralPath $newFile -PathType Leaf) { Remove-Item -LiteralPath $newFile -Force } } catch {} }
+            $rollbackFailed = $false
+            foreach ($newFile in $createdTargets) {
+                try { if (Test-Path -LiteralPath $newFile -PathType Leaf) { Remove-Item -LiteralPath $newFile -Force -ErrorAction Stop } }
+                catch { $rollbackFailed = $true; Write-Warn "Could not automatically remove: $newFile" }
+            }
             for ($i = $backedUpTargets.Count - 1; $i -ge 0; $i--) {
                 $record = $backedUpTargets[$i]
-                try { Copy-Item -LiteralPath $record.Backup -Destination $record.Target -Force } catch { Write-Warn "Could not automatically restore: $($record.Target)" }
+                try { Copy-Item -LiteralPath $record.Backup -Destination $record.Target -Force -ErrorAction Stop } catch { $rollbackFailed = $true; Write-Warn "Could not automatically restore: $($record.Target)" }
+            }
+            if (-not $rollbackFailed) {
+                # Everything is back as it was, so this run's partial backup must go: left
+                # behind, it would later look like the oldest backup and make Remove Fix
+                # delete originals it does not hold.
+                try {
+                    if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction Stop }
+                    if (-not $backupBaseExisted -and (Test-Path -LiteralPath $backupBase -PathType Container) -and -not (Get-ChildItem -LiteralPath $backupBase -Force | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $backupBase -Force -ErrorAction Stop
+                    }
+                } catch { Write-Warn "Could not remove the partial backup folder: $backupRoot" }
+            } else {
+                # Some files still hold fix content, and their originals are only in this
+                # folder. Record what was touched so Remove Fix can finish the job.
+                try {
+                    Write-FixBackupRecord -BackupRoot $backupRoot -ReplacedFiles @($backedUpTargets | ForEach-Object { [string]$_.Relative }) -AddedFiles @($createdRelatives) -Incomplete
+                    Write-Warn "The originals of the files above are kept in: $backupRoot. Run Remove Fix to put them back."
+                } catch { Write-Warn "Could not record the partial backup; its originals are kept in: $backupRoot" }
             }
             throw # Re-throw the exact exception
         }
@@ -1340,10 +1371,63 @@ function Remove-LanguagePack {
     }
 }
 
-# Backup folders inside 'og files' that look like a usable fix backup: a real
-# directory (not a link), non-empty and under 20 MB, which is what an install
-# writes. Shared by Remove-Fix and the pre-downgrade cleanup, so both agree on
-# what counts as a backup.
+# Name of the record an install writes into its backup folder. A function rather
+# than a variable, so every scope (handlers, tests) resolves the same value.
+function Get-FixBackupRecordName { return '.codhq-fix-backup.json' }
+
+# Records what one install did: which originals its backup folder holds and which
+# files the fix added. Written through a temp file, so a record is never half there.
+function Write-FixBackupRecord {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string[]]$ReplacedFiles = @(),
+        [string[]]$AddedFiles = @(),
+        [switch]$Incomplete
+    )
+    if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) { $null = New-Item -ItemType Directory -Path $BackupRoot -Force }
+    $record = [ordered]@{
+        Version       = 1
+        CreatedAt     = [DateTime]::UtcNow.ToString('o')
+        AppVersion    = [string]$AppVersion
+        ZipFileName   = [string]$ZipFileName
+        Complete      = (-not $Incomplete)
+        ReplacedFiles = @($ReplacedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        AddedFiles    = @($AddedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    $recordPath = Join-Path $BackupRoot (Get-FixBackupRecordName)
+    $tempPath = "$recordPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($tempPath, ($record | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $tempPath -Destination $recordPath -Force -ErrorAction Stop
+    } catch { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue; throw }
+}
+
+# Reads a backup record. A record that exists but cannot be read is an error, not
+# "no record": guessing would risk restoring or deleting the wrong files.
+function Read-FixBackupRecord {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        # PowerShell 7 turns ISO dates into DateTime by itself; 5.1 leaves a string.
+        $created = $raw.CreatedAt
+        if ($created -is [DateTime]) { $createdUtc = $created.ToUniversalTime() }
+        else { $createdUtc = [DateTime]::Parse([string]$created, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+        return [pscustomobject]@{
+            CreatedAtUtc  = $createdUtc
+            Complete      = [bool]$raw.Complete
+            ReplacedFiles = @($raw.ReplacedFiles | ForEach-Object { [string]$_ } | Where-Object { $_ })
+            AddedFiles    = @($raw.AddedFiles | ForEach-Object { [string]$_ } | Where-Object { $_ })
+        }
+    } catch {
+        throw "The fix backup record could not be read: $Path ($($_.Exception.Message)). Nothing was changed."
+    }
+}
+
+# Backup folders inside 'og files' that can be used to revert the fix: a real
+# directory (not a link) that either carries a backup record (any size, even one
+# with no replaced files) or, for backups made before records existed, holds at
+# least one file. Shared by Remove-Fix and the pre-downgrade cleanup, so both agree
+# on what counts as a backup.
 function Get-FixBackupCandidates {
     param([Parameter(Mandatory)][string]$TargetRoot)
     $candidates = [System.Collections.Generic.List[object]]::new()
@@ -1351,10 +1435,52 @@ function Get-FixBackupCandidates {
     if (-not (Test-Path -LiteralPath $backupBase -PathType Container)) { return $candidates }
     foreach ($dir in (Get-ChildItem -LiteralPath $backupBase -Directory -Force -ErrorAction SilentlyContinue)) {
         if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-        $bytes = (Get-ChildItem -LiteralPath $dir.FullName -File -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($bytes -gt 0 -and $bytes -lt 20MB) { $candidates.Add([pscustomobject]@{ Directory = $dir; Bytes = $bytes }) }
+        $recordPath = Join-Path $dir.FullName (Get-FixBackupRecordName)
+        $record = $null
+        if (Test-Path -LiteralPath $recordPath -PathType Leaf) { $record = Read-FixBackupRecord -Path $recordPath }
+        $bytes = [int64](Get-ChildItem -LiteralPath $dir.FullName -File -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($null -eq $record -and $bytes -le 0) { continue }
+        # Recorded backups are ordered by their record (exact time of the install);
+        # older ones by the folder's creation time, as before.
+        $sortKey = if ($null -ne $record) { $record.CreatedAtUtc } else { $dir.CreationTimeUtc }
+        $candidates.Add([pscustomobject]@{ Directory = $dir; Bytes = $bytes; Record = $record; SortKey = $sortKey })
     }
     return $candidates
+}
+
+# Decides, per file, what Remove-Fix does with recorded backups: the oldest record
+# that mentions a file wins. "Replaced" there means that folder holds the original,
+# "Added" means the file did not exist before the fix. Installing twice (whose
+# second backup only holds fix copies), a newer ZIP that added files, and a failed
+# install followed by a good one all resolve correctly this way.
+function Get-FixRemovalPlan {
+    param([Parameter(Mandatory)][string]$TargetRoot, [Parameter(Mandatory)][object[]]$Candidates)
+    $decisions = [ordered]@{}
+    foreach ($candidate in @($Candidates | Where-Object { $null -ne $_.Record } | Sort-Object SortKey)) {
+        foreach ($name in $candidate.Record.ReplacedFiles) {
+            $relative = Get-ValidatedRelativePath $name
+            $key = $relative.ToLowerInvariant()
+            if ($decisions.Contains($key)) { continue }
+            $decisions[$key] = [pscustomobject]@{ Relative = $relative; Action = 'Restore'; Source = (Join-Path $candidate.Directory.FullName $relative) }
+        }
+        foreach ($name in $candidate.Record.AddedFiles) {
+            $relative = Get-ValidatedRelativePath $name
+            $key = $relative.ToLowerInvariant()
+            if ($decisions.Contains($key)) { continue }
+            $decisions[$key] = [pscustomobject]@{ Relative = $relative; Action = 'Delete'; Source = $null }
+        }
+    }
+    $plan = @($decisions.Values)
+    # Check everything before touching anything: a missing original must stop the
+    # removal while the game folder is still exactly as it was.
+    foreach ($step in $plan) {
+        $step | Add-Member -NotePropertyName Destination -NotePropertyValue (Join-Path $TargetRoot $step.Relative)
+        Test-SafeGameDestination -TargetRoot $TargetRoot -Destination $step.Destination
+        if ($step.Action -eq 'Restore' -and -not (Test-Path -LiteralPath $step.Source -PathType Leaf)) {
+            throw "An original file is missing from its backup: $($step.Source). Nothing was changed."
+        }
+    }
+    return $plan
 }
 
 function Remove-Fix {
@@ -1365,10 +1491,39 @@ function Remove-Fix {
     $targetRoot = [IO.Path]::GetFullPath($targetRoot).TrimEnd('\')
     $backupBase = Join-Path $targetRoot 'og files'
     if (-not (Test-Path -LiteralPath $backupBase -PathType Container)) { throw "The backup directory was not found: $backupBase" }
-    $candidates = @(Get-FixBackupCandidates -TargetRoot $targetRoot)
-    if ($candidates.Count -eq 0) { throw 'No non-empty "og files" backup folder smaller than 20 MB was found. Nothing was changed.' }
-    $candidate = $candidates | Sort-Object { $_.Directory.CreationTimeUtc } | Select-Object -First 1
+    $candidates = @(Get-FixBackupCandidates -TargetRoot $targetRoot | Sort-Object SortKey)
+    if ($candidates.Count -eq 0) { throw 'No usable backup was found in "og files". Nothing was changed.' }
+    $candidate = $candidates[0]
     $backupRoot = $candidate.Directory.FullName
+
+    # Recorded backups say exactly what to do and need no download. When the oldest
+    # backup predates records, only it holds the true originals, so the whole
+    # removal follows the earlier rule for it.
+    if ($null -ne $candidate.Record) {
+        $plan = @(Get-FixRemovalPlan -TargetRoot $targetRoot -Candidates $candidates)
+        Write-Warn "Selected original-file backup: $backupRoot"
+        if (-not $SkipPrompt) {
+            $confirm = Read-Host "Selected backup:`n$backupRoot`n`nRemove the fix, restore the originals recorded in ""og files"", and then delete the whole ""og files"" folder? [y/N]"
+            if ($confirm -notmatch '^(y|yes)$') { Write-Info 'Fix removal cancelled.'; return }
+        }
+        $restored = 0; $removed = 0
+        foreach ($step in $plan) {
+            if ($step.Action -eq 'Restore') {
+                $null = New-Item -ItemType Directory -Path (Split-Path -Parent $step.Destination) -Force
+                Copy-Item -LiteralPath $step.Source -Destination $step.Destination -Force -ErrorAction Stop
+                $restored++
+            } elseif (Test-Path -LiteralPath $step.Destination -PathType Leaf) {
+                Remove-Item -LiteralPath $step.Destination -Force -ErrorAction Stop
+                $removed++
+            }
+        }
+        Write-Ok 'Fix removal completed.'
+        Write-Info "Restored original files: $restored"
+        Write-Info "Removed fix-added files: $removed"
+        Remove-FixBackupFolder -TargetRoot $targetRoot
+        return
+    }
+
     Write-Warn "Selected original-file backup: $backupRoot"
     if (-not $SkipPrompt) {
         $confirm = Read-Host "Selected backup:`n$backupRoot`n`nRemove the fix, restore the originals from this backup, and then delete the whole ""og files"" folder? [y/N]"
@@ -1387,6 +1542,17 @@ function Remove-Fix {
         foreach ($entry in $archive.Entries) {
             if ($entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\')) { continue }
             $relativeFiles.Add((Get-ValidatedRelativePath $entry.FullName))
+        }
+        # An unrecorded backup is only trusted when every file in it is a path the fix
+        # installs; anything else means the folder is not what it seems.
+        $knownFiles = @{}
+        foreach ($relative in $relativeFiles) { $knownFiles[$relative.ToLowerInvariant()] = $true }
+        $backupPrefix = $backupRoot.TrimEnd('\') + '\'
+        foreach ($backupFile in @(Get-ChildItem -LiteralPath $backupRoot -File -Recurse -Force -ErrorAction Stop)) {
+            $inside = $backupFile.FullName.Substring($backupPrefix.Length)
+            if (-not $knownFiles.ContainsKey($inside.ToLowerInvariant())) {
+                throw "The backup holds a file that is not part of the fix: $($backupFile.FullName). Nothing was changed."
+            }
         }
         $restored = 0; $removed = 0
         foreach ($relative in $relativeFiles) {
