@@ -8,7 +8,10 @@ param(
     # folder are not the user's, so the hand-off files go to the folder named here
     # and the downgrade uses the game folder the user's window was using.
     [string]$HandoffDirectory = '',
-    [string]$GameFolder = ''
+    [string]$GameFolder = '',
+    # Test mode: run against a fake Steam and game folder (see Test-SandboxMode and
+    # tests\Start-Sandbox.ps1). The folder must contain the .codhq-sandbox marker.
+    [string]$Sandbox = ''
 )
 
 # ==========================================
@@ -134,6 +137,7 @@ if ($needsOwnProcess -or $needsSta) {
         if ($PSBoundParameters.ContainsKey('DowngradeMethod')) { $forwarded += " -DowngradeMethod $DowngradeMethod" }
         if (-not [string]::IsNullOrWhiteSpace($HandoffDirectory)) { $forwarded += ' -HandoffDirectory ' + (ConvertTo-QuotedArgument $HandoffDirectory) }
         if (-not [string]::IsNullOrWhiteSpace($GameFolder)) { $forwarded += ' -GameFolder ' + (ConvertTo-QuotedArgument $GameFolder) }
+        if (-not [string]::IsNullOrWhiteSpace($Sandbox)) { $forwarded += ' -Sandbox ' + (ConvertTo-QuotedArgument $Sandbox) }
         Start-Process powershell.exe -ArgumentList "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launchFile`"$forwarded"
         return
     }
@@ -213,6 +217,24 @@ $AppManifestFile    = "appmanifest_1938090.acf"
 # (or a later PowerShell session) starts.
 $SettingsDirectory  = Join-Path $env:LOCALAPPDATA 'CallOfDutyHQ-SetupUtility'
 $SettingsFile       = Join-Path $SettingsDirectory 'settings.json'
+
+# Sandbox mode: everything is redirected into the sandbox folder before anything
+# reads settings or looks for Steam. A folder without the marker is refused, so the
+# switch can never be pointed at a real Steam or game folder by mistake.
+$global:SandboxRoot = ''
+if (-not [string]::IsNullOrWhiteSpace($Sandbox)) {
+    $sandboxFull = ''
+    try { $sandboxFull = [IO.Path]::GetFullPath($Sandbox.Trim().Trim('"')).TrimEnd('\') } catch { $sandboxFull = '' }
+    if (-not $sandboxFull -or -not (Test-Path -LiteralPath (Join-Path $sandboxFull '.codhq-sandbox') -PathType Leaf)) {
+        [void][System.Windows.MessageBox]::Show("Sandbox mode was requested, but this folder is not a sandbox (the .codhq-sandbox marker is missing):`n`n$Sandbox`n`nCreate one with tests\Start-Sandbox.ps1. The utility did not start.", 'Call of Duty MW4 Setup Utility', 'OK', 'Error')
+        return
+    }
+    $global:SandboxRoot = $sandboxFull
+    $SettingsDirectory = Join-Path $sandboxFull 'Settings'
+    $SettingsFile = Join-Path $SettingsDirectory 'settings.json'
+    # The sandbox's game folder, unless the starting window passed one.
+    if ([string]::IsNullOrWhiteSpace($GameFolder)) { $GameFolder = Join-Path $sandboxFull 'Game' }
+}
 
 # Where worker.json, last-run.json and the downgrade logs go (see Get-HandoffDirectory).
 # Worked out in a local first: when the script runs in the global scope (the
@@ -362,6 +384,11 @@ function Add-UniquePath {
 
 function Get-SteamLibraries {
     $libraries = [System.Collections.Generic.List[string]]::new()
+    # Sandbox mode only ever looks at the sandbox's fake Steam folder.
+    if (Test-SandboxMode) {
+        Add-UniquePath $libraries (Join-Path $global:SandboxRoot 'Steam')
+        return $libraries.ToArray()
+    }
     $registryKeys = @('HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam')
     foreach ($key in $registryKeys) {
         try {
@@ -693,21 +720,93 @@ function Get-ValidatedRelativePath([string]$EntryName) {
     return $name
 }
 
-function Download-FileWithProgress {
-    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$Destination, [Parameter(Mandatory)][string]$Label)
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+# SHA-256 of every file this utility downloads from its own GitHub releases, as
+# published by GitHub for each asset. A download that does not match is deleted and
+# nothing is installed from it. When a release asset is replaced, its hash here
+# must be updated in the same change: tools\Get-ReleaseHashes.ps1 prints this table.
+function Get-ReleaseAssetHash {
+    param([string]$Name)
+    $hashes = @{
+        'Call.of.Duty.Modern.Warfare.4.fix.v2.zip' = '99f1a58eac2122dcbb7a2e06423536585d0c9f23815e46bf48f428b075450008'
+        '1938090_25909941.lua'                     = 'e7e9434b627818b65bc58bebc31e6449fced4c6cf3667cae776c061342e75c0b'
+        'MW4_25909941_manifests.zip'               = 'c2add7096149c5a316fa822cd2e2faca54b29b8c27191144f47ed68072884e3f'
+        'Arabic.zip'                               = '1b3bf77c7de72a58b245b174c1dfeb9e1ebe6a8c89a5656bd4af2dfee0b6acb2'
+        'French.zip'                               = '3e0ac31f3710a5a94bc9f96ee264e6908dc41fbbf3de0de509bcfc00f13962cd'
+        'German.zip'                               = 'c18ede4328f88eafd7e222572900cc451c1ce5c6172f7a615f978a2d9e504a0c'
+        'Italian.zip'                              = '72792f4dd5fa7ea47f9540a4a046470955a9e4b95c25afd0061ccf35cd9acd37'
+        'Japanese.zip.part001'                     = 'fe736e45c252034b657accc9e43ba25fc15579367547803da9c63c6c561d728b'
+        'Japanese.zip.part002'                     = '48499f052f2aa0b242664fde155975948e98a89b093e4737a2a98d024053085c'
+        'Korean.zip.part001'                       = '2b7a788d985baadec96a52e3bddd640b8d40fe551c802f585d9cd93cc0fca639'
+        'Korean.zip.part002'                       = 'cfc1f94027dee87c7d898c811c18472607632c0f26ea8718e1a4660f39d4b575'
+        'Polish.zip'                               = 'b944eebe0b5ecf48451ba99f1863dcfef874bd815d7fcb3794082161239df3bb'
+        'Portuguese.-.Brazil.zip'                  = 'e90c6c0cd1a963583e50239cd9d7103e767d38ac5bff240ed76ecfb03ce57f6c'
+        'Russian.zip'                              = '48b095e1635a9fc3ce1adfedd58c1e99dd7166f3156aa62b389e1f05da6be50d'
+        'Simplified-Chinese.zip.part001'           = '53a56a847fef8c0599abe4a3e13632906672e480f088b5ba7a02fb719de504a5'
+        'Simplified-Chinese.zip.part002'           = '1fb012fe2c9f9942bb9aac3a0e5a4cb27aab7421b9f932db667cd8149c4277a6'
+        'Spanish.-.Latin.America.zip'              = 'c6492979b7b12db64e3bcbc1f86c24e86e79ef68b1fca1aedb1d42fca260fda0'
+        'Spanish.-.Spain.zip'                      = '8aa1cb521fa133fb294655b1c2d33930bd7cba02ed5642cb03219b59c6b5b5d7'
+        'Traditional.Chinese.zip'                  = '9d59c3a4c66f4253e7a243aeb6aca15de6dbce65939e937996d5758fd7268748'
+    }
+    if ([string]::IsNullOrWhiteSpace($Name) -or -not $hashes.ContainsKey($Name)) { return '' }
+    return [string]$hashes[$Name]
+}
+
+# Downloads from this repository's releases must have a pinned hash; anything else
+# (there is nothing else today) is downloaded unchecked.
+function Get-ExpectedDownloadHash {
+    param([Parameter(Mandatory)][string]$Url)
+    $releasePrefix = 'https://github.com/LarkTheStar/fix-installer/releases/download/'
+    if (-not $Url.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) { return '' }
+    $assetName = [Uri]::UnescapeDataString(($Url -split '/')[-1])
+    $hash = Get-ReleaseAssetHash $assetName
+    if (-not $hash) { throw "No pinned checksum is known for the release file '$assetName', so it was not downloaded. Update the utility, or add the file's SHA-256 to Get-ReleaseAssetHash." }
+    return $hash
+}
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+# One attempt at a download. With -ResumeFrom it asks the server for the rest of
+# the file only (an HTTP Range request) and appends to what is already on disk; a
+# server that ignores the range sends the whole file, which then starts over. A
+# partial file is left on disk for the next attempt to continue from.
+function Receive-DownloadAttempt {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Label,
+        [string]$UserAgent = 'CallOfDutyHQ-SetupUtility/1.1',
+        [int64]$ResumeFrom = 0
+    )
     $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Method = 'GET'
     $request.AllowAutoRedirect = $true
-    $request.UserAgent = 'CallOfDutyHQ-SetupUtility/1.1'
+    $request.UserAgent = $UserAgent
+    # A connection that stalls without closing counts as a failure after 2 minutes,
+    # instead of hanging the window for good.
+    $request.ReadWriteTimeout = 120000
+    if ($ResumeFrom -gt 0) { $request.AddRange([int64]$ResumeFrom) }
     $response = $null; $inputStream = $null; $outputStream = $null
     try {
-        $response = $request.GetResponse()
-        $total = [int64]$response.ContentLength
+        try { $response = $request.GetResponse() }
+        catch [System.Net.WebException] {
+            # 416: the range is past the end (the file on disk is already complete or
+            # wrong). Start the next attempt from scratch.
+            if ($ResumeFrom -gt 0 -and $null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 416) {
+                Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+        $resuming = ($ResumeFrom -gt 0 -and [int]$response.StatusCode -eq 206)
+        if (-not $resuming) { $ResumeFrom = 0 }
+        $total = if ([int64]$response.ContentLength -gt 0) { $ResumeFrom + [int64]$response.ContentLength } else { [int64]-1 }
         $inputStream = $response.GetResponseStream()
-        $outputStream = [System.IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $mode = if ($resuming) { [IO.FileMode]::Append } else { [IO.FileMode]::Create }
+        $outputStream = [System.IO.File]::Open($Destination, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $buffer = New-Object byte[] (1024 * 1024)
-        [int64]$downloaded = 0; $lastPercent = -1
+        [int64]$downloaded = $ResumeFrom; $lastPercent = -1
         while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $outputStream.Write($buffer, 0, $read)
             $downloaded += $read
@@ -719,24 +818,79 @@ function Download-FileWithProgress {
             } else { Write-Progress -Activity $Label -Status ("Downloaded {0:N1} MB" -f ($downloaded / 1MB)) -PercentComplete 0 }
         }
         $outputStream.Flush()
-        if ($downloaded -le 0) { throw 'The server returned an empty download.' }
+        # A dropped connection ends the read loop quietly, so check the size here;
+        # otherwise a truncated file would count as a successful download.
+        if ($downloaded -le 0) { throw "The server returned an empty download: $Url" }
         if ($total -gt 0 -and $downloaded -ne $total) { throw "Download appears incomplete: received $downloaded of $total bytes." }
-        Write-Progress -Activity $Label -Completed
-        Write-Ok ("Download complete: {0:N1} MB" -f ($downloaded / 1MB))
-    } catch {
-        Write-Progress -Activity $Label -Completed
-        # Close the file first: an open file cannot be deleted, and the partial
-        # download would be left behind.
-        if ($outputStream) {
-            try { $outputStream.Dispose() } catch { Write-Verbose "Could not close the partial download: $($_.Exception.Message)" }
-            $outputStream = $null
-        }
-        if (Test-Path -LiteralPath $Destination -PathType Leaf) { Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue }
-        throw "Download failed: $($_.Exception.Message)"
+        return $downloaded
     } finally {
         if ($outputStream) { $outputStream.Dispose() }
         if ($inputStream) { $inputStream.Dispose() }
         if ($response) { $response.Dispose() }
+    }
+}
+
+# Downloads with up to -MaxAttempts tries. After a failure the next try continues
+# from the bytes already received, so a dropped connection near the end of a
+# multi-gigabyte language pack does not start it over. The finished file is then
+# checked against its pinned SHA-256 (see Get-ReleaseAssetHash); a mismatch deletes
+# it and fails. Returns the size in bytes. On failure a partial file may remain;
+# the callers below delete it.
+function Invoke-ResumableDownload {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Label,
+        [string]$ExpectedSha256 = $null,
+        [string]$UserAgent = 'CallOfDutyHQ-SetupUtility/1.1',
+        [int]$MaxAttempts = 4,
+        [int]$RetryDelaySeconds = 3
+    )
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { Write-Verbose 'TLS 1.2 could not be selected; using the system default.' }
+    if (-not $PSBoundParameters.ContainsKey('ExpectedSha256')) { $ExpectedSha256 = Get-ExpectedDownloadHash -Url $Url }
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) { Remove-Item -LiteralPath $Destination -Force -ErrorAction Stop }
+    $attempt = 0
+    $bytes = [int64]0
+    while ($true) {
+        $attempt++
+        $resumeFrom = [int64]0
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) { $resumeFrom = [int64](Get-Item -LiteralPath $Destination).Length }
+        try {
+            $bytes = Receive-DownloadAttempt -Url $Url -Destination $Destination -Label $Label -UserAgent $UserAgent -ResumeFrom $resumeFrom
+            break
+        } catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            Write-Warn ("Download interrupted ({0}). Trying again ({1} of {2}), continuing from the {3:N1} MB already received..." -f $_.Exception.Message, ($attempt + 1), $MaxAttempts, ($(if (Test-Path -LiteralPath $Destination -PathType Leaf) { (Get-Item -LiteralPath $Destination).Length } else { 0 }) / 1MB))
+            if ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds ($RetryDelaySeconds * $attempt) }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+        $actual = Get-FileSha256 -Path $Destination
+        if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            throw "The downloaded file does not match its published checksum (expected SHA-256 $ExpectedSha256, got $actual). It was deleted and nothing was installed from it."
+        }
+    }
+    return $bytes
+}
+
+function Download-FileWithProgress {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Label,
+        [int]$RetryDelaySeconds = 3
+    )
+    try {
+        $expected = Get-ExpectedDownloadHash -Url $Url
+        $downloaded = Invoke-ResumableDownload -Url $Url -Destination $Destination -Label $Label -ExpectedSha256 $expected -RetryDelaySeconds $RetryDelaySeconds
+        Write-Progress -Activity $Label -Completed
+        Write-Ok ("Download complete: {0:N1} MB" -f ($downloaded / 1MB))
+        if ($expected) { Write-Ok 'Checksum verified: the file matches the published release.' }
+    } catch {
+        Write-Progress -Activity $Label -Completed
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) { Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue }
+        throw "Download failed: $($_.Exception.Message)"
     }
 }
 
@@ -759,20 +913,24 @@ function Install-Fix {
         $proceed = Read-Host 'Continue? [y/N]'
         if ($proceed -notmatch '^(y|yes)$') { Stop-Cancelled 'Installation cancelled.' }
         
-        # NEW: Kill game processes and stop anti-cheat services to release file locks
-        Write-Info "Closing running game processes and anti-cheat services to release file locks..."
-        $services = @("randgrid", "EasyAntiCheat", "EasyAntiCheat_EOS", "BEService")
-        foreach ($svc in $services) {
-            $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
-            # Only ask to stop services that are actually running, and keep sc.exe's
-            # output out of any console window that happens to be visible.
-            if ($service -and $service.Status -ne 'Stopped') { Stop-ServiceQuietly -Name $svc }
+        if (Test-SandboxMode) {
+            Write-Host '[SANDBOX] The game and anti-cheat services are not closed in sandbox mode.' -ForegroundColor DarkYellow
+        } else {
+            # NEW: Kill game processes and stop anti-cheat services to release file locks
+            Write-Info "Closing running game processes and anti-cheat services to release file locks..."
+            $services = @("randgrid", "EasyAntiCheat", "EasyAntiCheat_EOS", "BEService")
+            foreach ($svc in $services) {
+                $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                # Only ask to stop services that are actually running, and keep sc.exe's
+                # output out of any console window that happens to be visible.
+                if ($service -and $service.Status -ne 'Stopped') { Stop-ServiceQuietly -Name $svc }
+            }
+            $gameProcs = @("cod", "modernwarfare", "randgrid", "easyanticheat")
+            foreach ($proc in $gameProcs) {
+                Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds 3
         }
-        $gameProcs = @("cod", "modernwarfare", "randgrid", "easyanticheat")
-        foreach ($proc in $gameProcs) {
-            Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Seconds 3
 
         New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
         New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
@@ -829,7 +987,9 @@ function Install-Fix {
         $backupRoot = Join-Path $backupBase ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         $createdTargets = [System.Collections.Generic.List[string]]::new()
         $createdRelatives = [System.Collections.Generic.List[string]]::new()
+        $createdFolders = [System.Collections.Generic.List[string]]::new()
         $backedUpTargets = [System.Collections.Generic.List[object]]::new()
+        $targetPrefixLength = $targetRoot.TrimEnd('\').Length + 1
         try {
             foreach ($item in $planned) {
                 $destination = $item.TargetPath
@@ -843,7 +1003,16 @@ function Install-Fix {
                     if ($cursor.Equals($targetRoot, [StringComparison]::OrdinalIgnoreCase)) { break }
                     $cursor = Split-Path -Parent $cursor
                 }
-                if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+                if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+                    # Note each folder this creates, so Remove Fix (or a rollback) can take
+                    # it away again once it is empty.
+                    $walk = $parent
+                    while ($walk -and $walk.Length -gt $targetPrefixLength -and -not (Test-Path -LiteralPath $walk)) {
+                        $createdFolders.Add($walk.Substring($targetPrefixLength))
+                        $walk = Split-Path -Parent $walk
+                    }
+                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                }
                 if (Test-Path -LiteralPath $destination) {
                     $existingItem = Get-Item -LiteralPath $destination -Force
                     if ($existingItem.PSIsContainer) { Stop-Installer "A destination file conflicts with an existing directory: $destination" }
@@ -860,7 +1029,7 @@ function Install-Fix {
             # Written last, so a record only exists for an install that completed. It
             # tells Remove Fix exactly which originals this folder holds and which
             # files the fix added, without guessing from folder age or size.
-            Write-FixBackupRecord -BackupRoot $backupRoot -ReplacedFiles @($backedUpTargets | ForEach-Object { [string]$_.Relative }) -AddedFiles @($createdRelatives)
+            Write-FixBackupRecord -BackupRoot $backupRoot -ReplacedFiles @($backedUpTargets | ForEach-Object { [string]$_.Relative }) -AddedFiles @($createdRelatives) -AddedDirectories @($createdFolders)
         } catch {
             Write-Warn 'Installation failed. Attempting to restore replaced files...'
             $rollbackFailed = $false
@@ -872,6 +1041,8 @@ function Install-Fix {
                 $record = $backedUpTargets[$i]
                 try { Copy-Item -LiteralPath $record.Backup -Destination $record.Target -Force -ErrorAction Stop } catch { $rollbackFailed = $true; Write-Warn "Could not automatically restore: $($record.Target)" }
             }
+            # Folders this run created and left empty go too.
+            try { $null = Remove-EmptyFixFolder -TargetRoot $targetRoot -Relatives @($createdFolders) } catch { Write-Warn "Could not remove an empty folder the install created: $($_.Exception.Message)" }
             if (-not $rollbackFailed) {
                 # Everything is back as it was, so this run's partial backup must go: left
                 # behind, it would later look like the oldest backup and make Remove Fix
@@ -886,7 +1057,7 @@ function Install-Fix {
                 # Some files still hold fix content, and their originals are only in this
                 # folder. Record what was touched so Remove Fix can finish the job.
                 try {
-                    Write-FixBackupRecord -BackupRoot $backupRoot -ReplacedFiles @($backedUpTargets | ForEach-Object { [string]$_.Relative }) -AddedFiles @($createdRelatives) -Incomplete
+                    Write-FixBackupRecord -BackupRoot $backupRoot -ReplacedFiles @($backedUpTargets | ForEach-Object { [string]$_.Relative }) -AddedFiles @($createdRelatives) -AddedDirectories @($createdFolders) -Incomplete
                     Write-Warn "The originals of the files above are kept in: $backupRoot. Run Remove Fix to put them back."
                 } catch { Write-Warn "Could not record the partial backup; its originals are kept in: $backupRoot" }
             }
@@ -1423,17 +1594,21 @@ function Write-FixBackupRecord {
         [Parameter(Mandatory)][string]$BackupRoot,
         [string[]]$ReplacedFiles = @(),
         [string[]]$AddedFiles = @(),
+        # Folders the install created (relative), so Remove Fix can delete them
+        # again once they are empty.
+        [string[]]$AddedDirectories = @(),
         [switch]$Incomplete
     )
     if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) { $null = New-Item -ItemType Directory -Path $BackupRoot -Force }
     $record = [ordered]@{
-        Version       = 1
-        CreatedAt     = [DateTime]::UtcNow.ToString('o')
-        AppVersion    = [string]$AppVersion
-        ZipFileName   = [string]$ZipFileName
-        Complete      = (-not $Incomplete)
-        ReplacedFiles = @($ReplacedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        AddedFiles    = @($AddedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Version          = 2
+        CreatedAt        = [DateTime]::UtcNow.ToString('o')
+        AppVersion       = [string]$AppVersion
+        ZipFileName      = [string]$ZipFileName
+        Complete         = (-not $Incomplete)
+        ReplacedFiles    = @($ReplacedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        AddedFiles       = @($AddedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        AddedDirectories = @($AddedDirectories | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     }
     $recordPath = Join-Path $BackupRoot (Get-FixBackupRecordName)
     $tempPath = "$recordPath.$([guid]::NewGuid().ToString('N')).tmp"
@@ -1458,6 +1633,8 @@ function Read-FixBackupRecord {
             Complete      = [bool]$raw.Complete
             ReplacedFiles = @($raw.ReplacedFiles | ForEach-Object { [string]$_ } | Where-Object { $_ })
             AddedFiles    = @($raw.AddedFiles | ForEach-Object { [string]$_ } | Where-Object { $_ })
+            # Version 1 records have no folder list.
+            AddedDirectories = @($raw.AddedDirectories | ForEach-Object { [string]$_ } | Where-Object { $_ })
         }
     } catch {
         throw "The fix backup record could not be read: $Path ($($_.Exception.Message)). Nothing was changed."
@@ -1558,9 +1735,12 @@ function Remove-Fix {
                 $removed++
             }
         }
+        $addedFolders = @($candidates | Where-Object { $null -ne $_.Record } | ForEach-Object { $_.Record.AddedDirectories })
+        $removedFolders = Remove-EmptyFixFolder -TargetRoot $targetRoot -Relatives $addedFolders
         Write-Ok 'Fix removal completed.'
         Write-Info "Restored original files: $restored"
         Write-Info "Removed fix-added files: $removed"
+        if ($removedFolders -gt 0) { Write-Info "Removed empty fix folders: $removedFolders" }
         Remove-FixBackupFolder -TargetRoot $targetRoot
         return
     }
@@ -1579,46 +1759,117 @@ function Remove-Fix {
         Add-Type -AssemblyName System.IO.Compression
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
-        $relativeFiles = [System.Collections.Generic.List[string]]::new()
+        # The fix's own content, file by file: what each path holds when the fix is
+        # applied. That is what tells a fix copy apart from an original below.
+        $fixFiles = [System.Collections.Generic.List[object]]::new()
         foreach ($entry in $archive.Entries) {
             if ($entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\')) { continue }
-            $relativeFiles.Add((Get-ValidatedRelativePath $entry.FullName))
+            $fixFiles.Add([pscustomobject]@{ Relative = (Get-ValidatedRelativePath $entry.FullName); Hash = (Get-ZipEntrySha256 -Entry $entry) })
         }
+        $archive.Dispose(); $archive = $null
         # An unrecorded backup is only trusted when every file in it is a path the fix
         # installs; anything else means the folder is not what it seems.
         $knownFiles = @{}
-        foreach ($relative in $relativeFiles) { $knownFiles[$relative.ToLowerInvariant()] = $true }
-        $backupPrefix = $backupRoot.TrimEnd('\') + '\'
-        foreach ($backupFile in @(Get-ChildItem -LiteralPath $backupRoot -File -Recurse -Force -ErrorAction Stop)) {
-            $inside = $backupFile.FullName.Substring($backupPrefix.Length)
-            if (-not $knownFiles.ContainsKey($inside.ToLowerInvariant())) {
-                throw "The backup holds a file that is not part of the fix: $($backupFile.FullName). Nothing was changed."
+        foreach ($fixFile in $fixFiles) { $knownFiles[$fixFile.Relative.ToLowerInvariant()] = $true }
+        foreach ($legacy in @($candidates | Where-Object { $null -eq $_.Record })) {
+            $legacyPrefix = $legacy.Directory.FullName.TrimEnd('\') + '\'
+            foreach ($backupFile in @(Get-ChildItem -LiteralPath $legacy.Directory.FullName -File -Recurse -Force -ErrorAction Stop)) {
+                $inside = $backupFile.FullName.Substring($legacyPrefix.Length)
+                if (-not $knownFiles.ContainsKey($inside.ToLowerInvariant())) {
+                    throw "The backup holds a file that is not part of the fix: $($backupFile.FullName). Nothing was changed."
+                }
             }
         }
-        $restored = 0; $removed = 0
-        foreach ($relative in $relativeFiles) {
-            $dest = Join-Path $targetRoot $relative
-            $backup = Join-Path $backupRoot $relative
-            if (Test-Path -LiteralPath $backup -PathType Leaf) {
-                $null = New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force
-                Copy-Item -LiteralPath $backup -Destination $dest -Force -ErrorAction Stop
-                $restored++
-            } elseif (Test-Path -LiteralPath $dest -PathType Leaf) {
-                Remove-Item -LiteralPath $dest -Force -ErrorAction Stop
-                $removed++
+
+        # Decide everything before changing anything. Per file:
+        #  - restore the oldest backup copy whose content differs from the fix (a copy
+        #    equal to the fix was backed up from an earlier install, so it is no original);
+        #  - otherwise delete the game file only when it is exactly the fix's content;
+        #  - otherwise leave it alone: it is not fix content, and there is no original
+        #    to put back (for example a file an interrupted install already restored).
+        $backupDirs = @($candidates | ForEach-Object { $_.Directory.FullName })
+        $steps = [System.Collections.Generic.List[object]]::new()
+        foreach ($fixFile in $fixFiles) {
+            $dest = Join-Path $targetRoot $fixFile.Relative
+            Test-SafeGameDestination -TargetRoot $targetRoot -Destination $dest
+            $source = $null
+            foreach ($dir in $backupDirs) {
+                $copy = Join-Path $dir $fixFile.Relative
+                if ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-FileSha256 -Path $copy) -ne $fixFile.Hash) { $source = $copy; break }
+            }
+            if ($source) { $steps.Add([pscustomobject]@{ Action = 'Restore'; Relative = $fixFile.Relative; Destination = $dest; Source = $source }) }
+            elseif (Test-Path -LiteralPath $dest -PathType Leaf) {
+                if ((Get-FileSha256 -Path $dest) -eq $fixFile.Hash) { $steps.Add([pscustomobject]@{ Action = 'Delete'; Relative = $fixFile.Relative; Destination = $dest; Source = $null }) }
+                else { $steps.Add([pscustomobject]@{ Action = 'Keep'; Relative = $fixFile.Relative; Destination = $dest; Source = $null }) }
             }
         }
+
+        $restored = 0; $removed = 0; $kept = [System.Collections.Generic.List[string]]::new()
+        foreach ($step in $steps) {
+            switch ($step.Action) {
+                'Restore' {
+                    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $step.Destination) -Force
+                    Copy-Item -LiteralPath $step.Source -Destination $step.Destination -Force -ErrorAction Stop
+                    $restored++
+                }
+                'Delete' { Remove-Item -LiteralPath $step.Destination -Force -ErrorAction Stop; $removed++ }
+                'Keep' { $kept.Add($step.Relative) }
+            }
+        }
+        # Folders the fix's files live in that are now empty were created by the fix.
+        $folders = [System.Collections.Generic.List[string]]::new()
+        foreach ($fixFile in $fixFiles) {
+            $parent = Split-Path -Parent $fixFile.Relative
+            while (-not [string]::IsNullOrEmpty($parent)) { $folders.Add($parent); $parent = Split-Path -Parent $parent }
+        }
+        $removedFolders = Remove-EmptyFixFolder -TargetRoot $targetRoot -Relatives @($folders)
         Write-Ok 'Fix removal completed.'
         Write-Info "Restored original files: $restored"
         Write-Info "Removed fix-added files: $removed"
+        if ($removedFolders -gt 0) { Write-Info "Removed empty fix folders: $removedFolders" }
+        if ($kept.Count -gt 0) {
+            Write-Warn "Left alone, because they are not the fix's files and no original was backed up: $($kept.Count)"
+            foreach ($keptFile in $kept) { Write-Host "  $keptFile" }
+        }
     } finally {
-        if ($archive) { try { $archive.Dispose() } catch {} }
+        if ($archive) { try { $archive.Dispose() } catch { Write-Verbose 'The fix archive was already closed.' } }
         if (Test-Path -LiteralPath $workRoot) { Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
     # Every file was restored (any failure above throws before this point), so the
     # backups have done their job. Newer backups hold fix files rather than
     # originals, so none of them are worth keeping once the fix is gone.
     Remove-FixBackupFolder -TargetRoot $targetRoot
+}
+
+# SHA-256 of one file inside a ZIP, read straight from the archive.
+function Get-ZipEntrySha256 {
+    param([Parameter(Mandatory)]$Entry)
+    $stream = $Entry.Open()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '') }
+    finally { $sha.Dispose(); $stream.Dispose() }
+}
+
+# Removes the given folders (relative to the game folder) when they are empty,
+# deepest first, so nested folders the fix created all go. A folder that holds
+# anything, or is a link, stays. Returns how many were removed.
+function Remove-EmptyFixFolder {
+    param([Parameter(Mandatory)][string]$TargetRoot, [string[]]$Relatives = @())
+    $removedCount = 0
+    $prefix = $TargetRoot.TrimEnd('\') + '\'
+    $unique = @($Relatives | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique)
+    foreach ($relative in @($unique | Sort-Object { $_.Length } -Descending)) {
+        $relative = Get-ValidatedRelativePath $relative
+        $full = [IO.Path]::GetFullPath((Join-Path $TargetRoot $relative))
+        if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or -not $item.PSIsContainer) { continue }
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+        if (Get-ChildItem -LiteralPath $full -Force | Select-Object -First 1) { continue }
+        Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+        $removedCount++
+    }
+    return $removedCount
 }
 
 # Deletes "og files" under the game folder. Guarded: exactly an "og files" directory
@@ -1728,7 +1979,46 @@ function Launch-BatchFile {
 # ==========================================
 # SCRIPT 2 FUNCTIONS (Downgrade Tool)
 # ==========================================
+# Steam's running processes, to be closed. In sandbox mode none are returned: the
+# real Steam is never closed while testing against the sandbox's fake Steam folder.
+function Get-SteamClientProcess {
+    if (Test-SandboxMode) {
+        Write-Host '[SANDBOX] Steam is not closed in sandbox mode; your real Steam keeps running.' -ForegroundColor DarkYellow
+        return $null
+    }
+    return (Get-Process -Name steam* -ErrorAction SilentlyContinue)
+}
+
+function Start-SteamClient {
+    param([Parameter(Mandatory)][string]$SteamExe, [switch]$OnlyIfNotRunning)
+    if (Test-SandboxMode) {
+        Write-Host "[SANDBOX] Steam would be started here ($SteamExe); skipped in sandbox mode." -ForegroundColor DarkYellow
+        return
+    }
+    if ($OnlyIfNotRunning -and (Get-Process -Name steam -ErrorAction SilentlyContinue)) { return }
+    Start-Process -FilePath $SteamExe
+}
+
+function Start-SteamValidation {
+    if (Test-SandboxMode) {
+        Write-Host "[SANDBOX] Steam would be asked to validate app $AppId here; skipped in sandbox mode." -ForegroundColor DarkYellow
+        return
+    }
+    Start-Process "steam://validate/$AppId"
+}
+
+# Sandbox mode (-Sandbox <folder>) is for testing the utility end to end, including
+# the UAC hand-off, without touching the real Steam or game: Steam is <folder>\Steam,
+# the game is <folder>\Game and settings, hand-off files and logs live in
+# <folder>\Settings. tests\Start-Sandbox.ps1 builds such a folder and starts it.
+function Test-SandboxMode { return (-not [string]::IsNullOrWhiteSpace([string]$global:SandboxRoot)) }
+
 function Get-SteamInstallationPath {
+    if (Test-SandboxMode) {
+        $sandboxSteam = Join-Path $global:SandboxRoot 'Steam'
+        if (Test-Path -LiteralPath $sandboxSteam -PathType Container) { return $sandboxSteam }
+        return $null
+    }
     $registryPaths = @(
         @{ Path = "HKLM:\SOFTWARE\Wow6432Node\Valve\Steam"; Name = "InstallPath" },
         @{ Path = "HKCU:\Software\Valve\Steam";             Name = "SteamPath"   },
@@ -1745,35 +2035,20 @@ function Get-SteamInstallationPath {
     return $null
 }
 
+# The downgrade's downloader: same retries, resume and checksum as
+# Download-FileWithProgress, but it leaves reporting to the downgrade's own log
+# lines. A failed download leaves no partial file behind.
 function Download-WithProgress {
-    param([string]$Url, [string]$OutFile, [string]$Activity = "Downloading file")
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $request = [System.Net.HttpWebRequest]::Create($Url)
-    $request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PowerShell"
-    $request.AllowAutoRedirect = $true
-    $response = $request.GetResponse()
-    $totalBytes = $response.ContentLength
-    $stream = $response.GetResponseStream()
-    $fileStream = [System.IO.File]::Create($OutFile)
-    $buffer = New-Object byte[] 8192
-    $bytesRead = 0; $bytesTotal = 0; $lastPercent = -1
+    param([string]$Url, [string]$OutFile, [string]$Activity = "Downloading file", [int]$RetryDelaySeconds = 3)
     try {
-        while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $fileStream.Write($buffer, 0, $bytesRead)
-            $bytesTotal += $bytesRead
-            $percent = if ($totalBytes -gt 0) { [int][Math]::Floor(($bytesTotal / $totalBytes) * 100) } else { 0 }
-            if ($percent -ne $lastPercent) {
-                $downloadedMB = [Math]::Round($bytesTotal / 1MB, 2)
-                $totalMB = if ($totalBytes -gt 0) { [Math]::Round($totalBytes / 1MB, 2) } else { "?" }
-                Write-Progress -Activity $Activity -Status "$downloadedMB MB / $totalMB MB" -PercentComplete $percent
-                $lastPercent = $percent
-            }
-        }
-        # A dropped connection ends the read loop quietly, so check the size here;
-        # otherwise a truncated file would count as a successful download.
-        if ($bytesTotal -le 0) { throw "The server returned an empty download: $Url" }
-        if ($totalBytes -gt 0 -and $bytesTotal -ne $totalBytes) { throw "Download appears incomplete: received $bytesTotal of $totalBytes bytes." }
-    } finally { $fileStream.Close(); $stream.Close(); $response.Close(); Write-Progress -Activity $Activity -Completed }
+        $expected = Get-ExpectedDownloadHash -Url $Url
+        $null = Invoke-ResumableDownload -Url $Url -Destination $OutFile -Label $Activity -ExpectedSha256 $expected `
+            -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PowerShell' -RetryDelaySeconds $RetryDelaySeconds
+        if ($expected) { Write-Ok 'Checksum verified: the file matches the published release.' }
+    } catch {
+        if (Test-Path -LiteralPath $OutFile -PathType Leaf) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+        throw
+    } finally { Write-Progress -Activity $Activity -Completed }
 }
 
 # Extracts the downgrade's manifest ZIP into the Steam folder. Every entry is
@@ -1966,6 +2241,10 @@ function Invoke-ExternalPowerShellScript {
 
 function Wait-SteamReady {
     param([int]$Timeout = 180)
+    if (Test-SandboxMode) {
+        Write-Host '[SANDBOX] Not waiting for Steam to load; it is not started in sandbox mode.' -ForegroundColor DarkYellow
+        return
+    }
     $steamReady = $false
     $elapsed = 0
     Write-Host "Waiting for Steam to fully open (Do not close this window)..." -ForegroundColor Yellow
@@ -1992,9 +2271,43 @@ function Wait-SteamReady {
     }
 }
 
+# Downloads the version-locked Lua file and manifests ZIP into -Destination. Run
+# before the fix is reverted and before Steam is closed, so a network problem stops
+# the downgrade while nothing has been changed yet.
+function Save-DowngradeDownload {
+    param([Parameter(Mandatory)][string]$Destination)
+    if (-not (Test-Path -LiteralPath $Destination -PathType Container)) { $null = New-Item -ItemType Directory -Path $Destination -Force }
+    $luaPath = Join-Path $Destination $SourceFileName
+    $zipPath = Join-Path $Destination 'MW4_25909941_manifests.zip'
+    Write-Host "`nDownloading the version-locked Lua file and manifests before anything is changed..." -ForegroundColor Yellow
+    Download-WithProgress -Url $LuaDownloadUrl -OutFile $luaPath -Activity "Downloading version locked Lua file"
+    Download-WithProgress -Url $ZipDownloadUrl -OutFile $zipPath -Activity "Downloading manifests ZIP"
+    Write-Host "Both downloads are ready." -ForegroundColor Green
+    return [pscustomobject]@{ Lua = $luaPath; ManifestZip = $zipPath }
+}
+
+# The whole downgrade in the order that keeps a failure harmless: check it can run,
+# download what it needs, and only then revert the fix and change Steam.
+function Invoke-PreparedDowngrade {
+    param([ValidateSet('Normal', 'Nuclear')][string]$Method = 'Normal')
+    $null = Test-SteamDowngradeReadiness -Method $Method
+    $prefetchRoot = Join-Path $env:TEMP ('codhq-prefetch-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $prefetched = Save-DowngradeDownload -Destination $prefetchRoot
+        # Revert an applied fix first: its files and backups belong to the version
+        # that is about to be replaced.
+        Clear-FixBeforeDowngrade -Method $Method
+        Invoke-SteamDowngrade -Method $Method -Prefetched $prefetched
+    } finally {
+        if (Test-Path -LiteralPath $prefetchRoot) { Remove-Item -LiteralPath $prefetchRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Invoke-SteamDowngrade {
-    param([string]$Method)
-    
+    # -Prefetched: the Lua file and manifests ZIP already downloaded by
+    # Save-DowngradeDownload. Without it they are downloaded here, as before.
+    param([string]$Method, $Prefetched = $null)
+
     Write-Host "`n==================================================" -ForegroundColor Cyan
     Write-Host "       Steam MW4 Version Downgrade Tool" -ForegroundColor Cyan
     Write-Host "==================================================" -ForegroundColor Cyan
@@ -2010,7 +2323,7 @@ function Invoke-SteamDowngrade {
     if ($Method -eq "Nuclear") {
         Write-Host "`n=== INITIATING NUCLEAR METHOD ===" -ForegroundColor Magenta
         Write-Host "`nClosing all Steam processes..." -ForegroundColor Yellow
-        $steamProcesses = Get-Process -Name steam* -ErrorAction SilentlyContinue
+        $steamProcesses = Get-SteamClientProcess
         if ($steamProcesses) { $steamProcesses | Stop-Process -Force; Start-Sleep -Seconds 3; Write-Host "Steam closed." -ForegroundColor Green }
         Write-Host "Cleaning Steam installation folder (this may take a moment)..." -ForegroundColor Yellow
         $safeItems = @("appcache", "config", "steam", "steamapps", "userdata", "steam.exe")
@@ -2022,27 +2335,31 @@ function Invoke-SteamDowngrade {
         Write-Host "Cleanup complete." -ForegroundColor Green
         $steamExe = Join-Path -Path $steamRoot -ChildPath "steam.exe"
         Write-Host "`nStarting Steam..." -ForegroundColor Yellow
-        Start-Process -FilePath $steamExe
+        Start-SteamClient -SteamExe $steamExe
         Wait-SteamReady
         Write-Host "`nClosing Steam to run installer..." -ForegroundColor Yellow
-        $steamProcesses = Get-Process -Name steam* -ErrorAction SilentlyContinue
+        $steamProcesses = Get-SteamClientProcess
         if ($steamProcesses) { $steamProcesses | Stop-Process -Force; Start-Sleep -Seconds 3 }
         Write-Host "`nDownloading BetterSteamTools (irm https://ps.lua.tools/install-ost.ps1 | iex)..." -ForegroundColor Yellow
         # The installer runs in its own powershell.exe: it ends with "exit 1" when it
         # fails, which inside this process would close the administrator window half
         # way through the downgrade. Its output still appears in the log line by line.
         $bstRoot = Join-Path $env:TEMP ('codhq-bst-' + [guid]::NewGuid().ToString('N'))
-        try {
+        if (Test-SandboxMode) {
+            # The installer finds Steam through the registry, so it would always change
+            # the real Steam; in sandbox mode it is not run at all.
+            Write-Host '[SANDBOX] BetterSteamTools is not installed in sandbox mode: its installer always targets the real Steam.' -ForegroundColor DarkYellow
+        } else { try {
             $bstScript = ConvertTo-ScriptText (Invoke-RestMethod -Uri "https://ps.lua.tools/install-ost.ps1")
             $bstRun = Invoke-ExternalPowerShellScript -ScriptText $bstScript -WorkRoot $bstRoot -Name 'install-ost' -TimeoutSeconds 600
             if ($bstRun.TimedOut) { Write-Warning 'The BetterSteamTools installer did not finish within 10 minutes and was stopped. Continuing with the downgrade.' }
             elseif ($bstRun.ExitCode -ne 0) { Write-Warning "The BetterSteamTools installer reported an error (exit code $($bstRun.ExitCode)). Continuing with the downgrade." }
             else { Write-Ok 'BetterSteamTools installer finished.' }
         } catch { Write-Warning "Failed to run the installer script: $($_.Exception.Message)" }
-        finally { if (Test-Path -LiteralPath $bstRoot) { Remove-Item -LiteralPath $bstRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+        finally { if (Test-Path -LiteralPath $bstRoot) { Remove-Item -LiteralPath $bstRoot -Recurse -Force -ErrorAction SilentlyContinue } } }
         Write-Host "`nRestarting Steam (via BetterSteamTools)..." -ForegroundColor Yellow
         Start-Sleep -Seconds 2
-        if (-not (Get-Process -Name steam -ErrorAction SilentlyContinue)) { Start-Process -FilePath $steamExe }
+        Start-SteamClient -SteamExe $steamExe -OnlyIfNotRunning
         Wait-SteamReady
         Write-Host "`nNuclear method phase complete. Proceeding to normal installation..." -ForegroundColor Magenta
         # BetterSteamTools reads Lua files from config\stplug-in (its own config says
@@ -2054,7 +2371,7 @@ function Invoke-SteamDowngrade {
     }
 
     Write-Host "`nClosing all Steam processes..." -ForegroundColor Yellow
-    $steamProcesses = Get-Process -Name steam* -ErrorAction SilentlyContinue
+    $steamProcesses = Get-SteamClientProcess
     if ($steamProcesses) { $steamProcesses | Stop-Process -Force; Start-Sleep -Seconds 3; Write-Host "Steam closed." -ForegroundColor Green }
 
     # The old Lua files and this game's depotcache manifests are moved to a temporary
@@ -2090,8 +2407,13 @@ function Invoke-SteamDowngrade {
         # Downloaded into the work folder, so a failed download never leaves a
         # partial file in stplug-in.
         $tempLua = Join-Path $workRoot $SourceFileName
-        Write-Host "`nDownloading version locked Lua file..." -ForegroundColor Yellow
-        Download-WithProgress -Url $LuaDownloadUrl -OutFile $tempLua -Activity "Downloading version locked Lua file"
+        if ($null -ne $Prefetched) {
+            Write-Host "`nUsing the version locked Lua file downloaded earlier..." -ForegroundColor Yellow
+            Copy-Item -LiteralPath $Prefetched.Lua -Destination $tempLua -Force -ErrorAction Stop
+        } else {
+            Write-Host "`nDownloading version locked Lua file..." -ForegroundColor Yellow
+            Download-WithProgress -Url $LuaDownloadUrl -OutFile $tempLua -Activity "Downloading version locked Lua file"
+        }
         Move-Item -LiteralPath $tempLua -Destination $newLuaPath -Force -ErrorAction Stop
         $newLuaPlaced = $true
         Write-Host "Downloaded and installed as: $TargetFileName" -ForegroundColor Green
@@ -2113,8 +2435,13 @@ function Invoke-SteamDowngrade {
         $manifestsMoved = $true
 
         $tempZip = Join-Path $workRoot "MW4_25909941_manifests.zip"
-        Write-Host "`nDownloading manifests ZIP..." -ForegroundColor Yellow
-        Download-WithProgress -Url $ZipDownloadUrl -OutFile $tempZip -Activity "Downloading manifests ZIP"
+        if ($null -ne $Prefetched) {
+            Write-Host "`nUsing the manifests ZIP downloaded earlier..." -ForegroundColor Yellow
+            Copy-Item -LiteralPath $Prefetched.ManifestZip -Destination $tempZip -Force -ErrorAction Stop
+        } else {
+            Write-Host "`nDownloading manifests ZIP..." -ForegroundColor Yellow
+            Download-WithProgress -Url $ZipDownloadUrl -OutFile $tempZip -Activity "Downloading manifests ZIP"
+        }
         Write-Host "Extracting downgrade manifests into Steam root: $steamRoot" -ForegroundColor Gray
         Expand-ZipOverwrite -ZipPath $tempZip -DestinationPath $steamRoot -Journal $extractJournal -BackupDirectory $backupExtractDir
         Write-Host "Downgrade manifests extracted successfully." -ForegroundColor Green
@@ -2195,10 +2522,10 @@ function Invoke-SteamDowngrade {
     $steamExe = Join-Path -Path $steamRoot -ChildPath "steam.exe"
     if (Test-Path $steamExe) {
         Write-Host "`nLaunching Steam..." -ForegroundColor Yellow
-        Start-Process -FilePath $steamExe
+        Start-SteamClient -SteamExe $steamExe
         Wait-SteamReady
         Write-Host "`nTriggering automatic validation..." -ForegroundColor Cyan
-        Start-Process "steam://validate/$AppId"
+        Start-SteamValidation
         Write-Host ">> IMPORTANT: Steam should now begin validating your files." -ForegroundColor Cyan
     } else { Write-Warning "steam.exe was not found at the expected path: $steamExe" }
     
@@ -3615,6 +3942,7 @@ function Get-DiagnosticsHeader {
     $mode = 'interactive (GUI launched normally)'
     if ($global:RequestedDowngradeMethod) { $mode = 'administrator downgrade run (' + [string]$global:RequestedDowngradeMethod + ')' }
     if ([string]::IsNullOrWhiteSpace($global:ScriptPath)) { $mode += ', started from irm | iex' }
+    if (Test-SandboxMode) { $mode += ', SANDBOX: ' + [string]$global:SandboxRoot }
 
     $lines.Add('Call of Duty MW4 Setup Utility - diagnostics')
     $lines.Add(('Saved: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))
@@ -4273,7 +4601,12 @@ function Set-GameFolderCard {
 $window.Dispatcher.Invoke([action]{
     try {
         $savedFolder = Get-SavedGameFolder
-        if ($savedFolder) {
+        # A folder passed in at startup (-GameFolder, or the sandbox's game) is the
+        # one every action uses, so the card shows that one.
+        if ($global:SessionGameFolder -and (Test-Path -LiteralPath $global:SessionGameFolder -PathType Container)) {
+            $label = if (Test-SandboxMode) { 'Sandbox game folder' } else { 'Game folder set' }
+            Set-GameFolderCard -Title $label -Detail "Using: $($global:SessionGameFolder)" -ColorKey 'Green'
+        } elseif ($savedFolder) {
             Set-GameFolderCard -Title 'Game folder set' -Detail "Using your saved folder: $savedFolder" -ColorKey 'Green'
         } else {
             $detected = @(Find-CallOfDutyHQ)
@@ -4682,7 +5015,9 @@ function Get-WorkerHandshakePid {
         $handshakePath = Get-WorkerHandshakePath
         if (-not (Test-Path -LiteralPath $handshakePath -PathType Leaf)) { return 0 }
         $info = Get-Content -LiteralPath $handshakePath -Raw | ConvertFrom-Json
-        if ([datetime]$info.StartedAt -lt $Since.AddSeconds(-15)) { return 0 }
+        # Without -Since every announcement counts (DateTime.MinValue minus 15
+        # seconds would throw and silently report "no worker").
+        if ($Since -gt [DateTime]::MinValue.AddSeconds(15) -and [datetime]$info.StartedAt -lt $Since.AddSeconds(-15)) { return 0 }
         return [int]$info.Pid
     } catch { return 0 }
 }
@@ -4785,10 +5120,8 @@ Run the Nuclear downgrade now? [y/N]
         # Called straight, not through Run-Action: this function already runs inside
         # an action, and Run-Action ignores a nested call while one is in progress
         # (that guard is what makes the button do nothing when the app is elevated).
-        # Revert an applied fix first: its files and backups belong to the version
-        # that is about to be replaced.
-        Clear-FixBeforeDowngrade -Method $Method
-        Invoke-SteamDowngrade -Method $Method
+        # Checks, downloads, then reverts the fix and runs the downgrade.
+        Invoke-PreparedDowngrade -Method $Method
         return
     }
 
@@ -4819,6 +5152,7 @@ Run the Nuclear downgrade now? [y/N]
         $folderInUse = $null
         try { $folderInUse = Resolve-GameFolderQuiet } catch { $folderInUse = $null }
         if ($folderInUse) { $handoffArguments += ' -GameFolder ' + (ConvertTo-QuotedArgument $folderInUse) }
+        if (Test-SandboxMode) { $handoffArguments += ' -Sandbox ' + (ConvertTo-QuotedArgument $global:SandboxRoot) }
         $elevated = Start-Process powershell.exe -Verb RunAs -PassThru -ArgumentList ("-NoProfile -STA -ExecutionPolicy Bypass -File `"$scriptPath`" -RunDowngradeOnly -DowngradeMethod $Method" + $handoffArguments)
         # The elevated instance is the one that runs the downgrade, and it shows its
         # own window with the live log. This window hides rather than closes, so it
@@ -4917,6 +5251,7 @@ function Complete-DowngradeRunChrome {
     try {
         $label = if ($Method -eq 'Nuclear') { 'Nuclear downgrade' } else { 'Normal downgrade' }
         $window.Title = 'Call of Duty MW4 Setup Utility - Administrator'
+        if (Test-SandboxMode) { $window.Title += ' [SANDBOX]' }
 
         $savedPath = $null
         try {
@@ -4989,13 +5324,9 @@ if ($RunDowngradeOnly) {
             # Logged inside the action: Run-Action clears the log before it starts.
             Add-LogEntry -Text ('=== ' + $chosen + ' downgrade started in the administrator window ===') -Color '#C586C0'
             Add-LogEntry -Text '    This can take several minutes; the log below updates live.' -Color '#606070'
-            # Checked again here: this window may run as another account, and nothing
-            # may be reverted for a downgrade that cannot run.
-            $null = Test-SteamDowngradeReadiness -Method $chosen
-            # Revert an applied fix first: its files and backups belong to the version
-            # that is about to be replaced.
-            Clear-FixBeforeDowngrade -Method $chosen
-            Invoke-SteamDowngrade -Method $chosen
+            # Checked again here (this window may run as another account), then the
+            # downloads, and only then is the fix reverted and Steam changed.
+            Invoke-PreparedDowngrade -Method $chosen
         }
         $runState = 'Ready'
         try {
@@ -5011,6 +5342,14 @@ if ($RunDowngradeOnly) {
 } else {
     Show-Page -Index ([int]$startupSettings.LastPage) -Force
     Add-LogEntry -Text 'Ready. Choose an action from the sidebar to begin.' -Color '#606070'
+}
+
+# Sandbox mode is impossible to miss: the title says so and the log explains what is
+# real (downloads, UAC) and what is fake (Steam, the game, settings).
+if (Test-SandboxMode) {
+    $window.Title = $window.Title + ' [SANDBOX]'
+    Add-LogEntry -Text ('[SANDBOX] Test mode. Steam: ' + (Join-Path $global:SandboxRoot 'Steam') + '  Game: ' + (Join-Path $global:SandboxRoot 'Game')) -Color '#FFD700'
+    Add-LogEntry -Text '          Settings, hand-off files and logs stay in the sandbox. Your real Steam and game are not touched; Steam is never closed or started.' -Color '#FFD700'
 }
 
 # Handlers created in script scope resolve the script's functions normally, but a

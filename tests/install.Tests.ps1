@@ -28,6 +28,56 @@ BeforeAll {
     # exist; this stub stands in for it there.
     if (-not (Get-Command Get-Service -ErrorAction SilentlyContinue)) { function Get-Service { param($Name) } }
 
+    # A tiny HTTP server on 127.0.0.1 for the download tests. It serves $Content,
+    # honours "Range: bytes=N-" (unless -NoRange), and for the first $FailRequests
+    # requests sends only $FailAfterBytes bytes of the body and drops the connection.
+    function Start-TestHttpServer {
+        param([byte[]]$Content, [int]$FailRequests = 0, [int]$FailAfterBytes = 0, [switch]$NoRange)
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $state = [hashtable]::Synchronized(@{ Requests = 0; Ranges = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new()) })
+        $shell = [powershell]::Create()
+        [void]$shell.AddScript({
+            param($listener, [byte[]]$content, $failRequests, $failAfter, $noRange, $state)
+            while ($true) {
+                try { $client = $listener.AcceptTcpClient() } catch { break }
+                try {
+                    $stream = $client.GetStream()
+                    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+                    $start = [int64]0
+                    $line = $reader.ReadLine()
+                    while ($line) {
+                        if ($line -match '^Range:\s*bytes=(\d+)-') { $start = [int64]$Matches[1] }
+                        $line = $reader.ReadLine()
+                    }
+                    $state.Requests++
+                    [void]$state.Ranges.Add($start)
+                    if ($noRange) { $start = 0 }
+                    $body = $content.Length - $start
+                    $status = if ($start -gt 0) { '206 Partial Content' } else { '200 OK' }
+                    $header = "HTTP/1.1 $status`r`nContent-Length: $body`r`nContent-Type: application/octet-stream`r`nConnection: close`r`n"
+                    if ($start -gt 0) { $header += "Content-Range: bytes $start-$($content.Length - 1)/$($content.Length)`r`n" }
+                    $header += "`r`n"
+                    $headerBytes = [Text.Encoding]::ASCII.GetBytes($header)
+                    $stream.Write($headerBytes, 0, $headerBytes.Length)
+                    $send = $body
+                    if ($state.Requests -le $failRequests) { $send = [Math]::Min([int64]$failAfter, $body) }
+                    $stream.Write($content, [int]$start, [int]$send)
+                    $stream.Flush()
+                } catch { } finally { $client.Close() }
+            }
+        }).AddArgument($listener).AddArgument($Content).AddArgument($FailRequests).AddArgument($FailAfterBytes).AddArgument([bool]$NoRange).AddArgument($state)
+        $handle = $shell.BeginInvoke()
+        [pscustomobject]@{ Url = "http://127.0.0.1:$($listener.LocalEndpoint.Port)/asset.bin"; Listener = $listener; Shell = $shell; Handle = $handle; State = $state }
+    }
+    function Stop-TestHttpServer {
+        param($Server)
+        $Server.Listener.Stop()
+        try { [void]$Server.Shell.EndInvoke($Server.Handle) } catch { }
+        $Server.Shell.Dispose()
+    }
+    function Get-BytesSha256 { param([byte[]]$Bytes) $sha = [Security.Cryptography.SHA256]::Create(); try { ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') }) -join '' } finally { $sha.Dispose() } }
+
     # Prompts are answered from this queue, in order.
     $global:CodhqTestAnswers = [System.Collections.Generic.Queue[string]]::new()
     function Set-Answers { param([string[]]$Answers) $global:CodhqTestAnswers.Clear(); foreach ($a in $Answers) { $global:CodhqTestAnswers.Enqueue($a) } }
@@ -376,6 +426,19 @@ Describe 'Fix install and removal' {
         Get-Text (Join-Path $game 'c.txt') | Should -Be 'original c'
     }
 
+    It 'removes the folders a recorded install created, once they are empty' {
+        $null = New-Item -ItemType Directory -Path (Join-Path $game 'keep') -Force
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed'; 'deep/er/new.txt' = 'added'; 'keep/new.txt' = 'added' })
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'y'
+        Remove-Fix
+        Test-Path -LiteralPath (Join-Path $game 'deep') | Should -BeFalse
+        # This folder existed before the fix, so it stays even though it is empty.
+        Test-Path -LiteralPath (Join-Path $game 'keep') -PathType Container | Should -BeTrue
+    }
+
     It 'removes a fix that only added files' {
         Remove-Item -LiteralPath $fixZip -Force
         New-TestZip -Path $fixZip -Entries ([ordered]@{ 'new.txt' = 'added only' })
@@ -424,9 +487,58 @@ Describe 'Fix install and removal' {
             $legacy = Join-Path $game 'og files\20240101-000000-abcdef'
             $null = New-Item -ItemType Directory -Path $legacy -Force
             Set-Content -LiteralPath (Join-Path $legacy 'a.txt') -Value 'original'
-            Set-Content -LiteralPath (Join-Path $game 'a.txt') -Value 'fixed'
+            # The game holds exactly the fix's bytes, as it does after a real install.
+            [IO.File]::WriteAllText((Join-Path $game 'a.txt'), 'fixed')
             $null = New-Item -ItemType Directory -Path (Join-Path $game 'sub') -Force
-            Set-Content -LiteralPath (Join-Path $game 'sub\b.txt') -Value 'added'
+            [IO.File]::WriteAllText((Join-Path $game 'sub\b.txt'), 'added')
+        }
+
+        It 'removes the folder the fix created once it is empty' {
+            Set-Answers 'y'
+            Remove-Fix
+            Test-Path -LiteralPath (Join-Path $game 'sub') | Should -BeFalse
+        }
+
+        It 'restores originals from a newer backup when an interrupted install left an older partial one' {
+            # An older version: an install failed after backing up a.txt only, and its
+            # rollback put a.txt and c.txt back. A later install then succeeded.
+            Set-Content -LiteralPath (Join-Path $game 'c.txt') -Value 'original c'
+            $complete = Join-Path $game 'og files\20240102-000000-fedcba'
+            $null = New-Item -ItemType Directory -Path $complete -Force
+            Set-Content -LiteralPath (Join-Path $complete 'a.txt') -Value 'original'
+            Set-Content -LiteralPath (Join-Path $complete 'c.txt') -Value 'original c'
+            (Get-Item -LiteralPath $legacy).CreationTimeUtc = [DateTime]::UtcNow.AddDays(-2)
+            (Get-Item -LiteralPath $complete).CreationTimeUtc = [DateTime]::UtcNow.AddDays(-1)
+            [IO.File]::WriteAllText((Join-Path $game 'c.txt'), 'fixed c')
+            Remove-Item -LiteralPath $fixZip -Force
+            New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed'; 'c.txt' = 'fixed c'; 'sub/b.txt' = 'added' })
+            Set-Answers 'y'
+            Remove-Fix
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+            Get-Text (Join-Path $game 'c.txt') | Should -Be 'original c'
+            Test-Path -LiteralPath (Join-Path $game 'sub\b.txt') | Should -BeFalse
+        }
+
+        It 'skips a backup copy that is the fix itself, from installing twice' {
+            # Second install of an older version: its backup holds the fix's a.txt.
+            $second = Join-Path $game 'og files\20240103-000000-aaaaaa'
+            $null = New-Item -ItemType Directory -Path (Join-Path $second 'sub') -Force
+            [IO.File]::WriteAllText((Join-Path $second 'a.txt'), 'fixed')
+            [IO.File]::WriteAllText((Join-Path $second 'sub\b.txt'), 'added')
+            (Get-Item -LiteralPath $legacy).CreationTimeUtc = [DateTime]::UtcNow.AddDays(-2)
+            (Get-Item -LiteralPath $second).CreationTimeUtc = [DateTime]::UtcNow.AddDays(-1)
+            Set-Answers 'y'
+            Remove-Fix
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+            Test-Path -LiteralPath (Join-Path $game 'sub\b.txt') | Should -BeFalse
+        }
+
+        It 'leaves a file alone that is neither the fix nor backed up' {
+            Set-Content -LiteralPath (Join-Path $game 'sub\b.txt') -Value 'changed by someone else'
+            Set-Answers 'y'
+            Remove-Fix
+            Get-Text (Join-Path $game 'sub\b.txt') | Should -Be 'changed by someone else'
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
         }
 
         It 'still removes the fix the old way' {
@@ -758,6 +870,17 @@ Describe 'Steam downgrade: Lua file and manifests' {
         (& $leftoverBackups).Count | Should -Be $before.Count
     }
 
+    It 'uses files downloaded beforehand instead of downloading again' {
+        $prefetch = Join-Path $TestDrive ('prefetch-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $prefetch -Force
+        Set-Content -LiteralPath (Join-Path $prefetch 'lua') -Value 'prefetched lua'
+        Copy-Item -LiteralPath $manifestZip -Destination (Join-Path $prefetch 'zip')
+        Invoke-SteamDowngrade -Method Normal -Prefetched ([pscustomobject]@{ Lua = (Join-Path $prefetch 'lua'); ManifestZip = (Join-Path $prefetch 'zip') })
+        Get-Text (Join-Path $plugIn '1938090.lua') | Should -Be 'prefetched lua'
+        Get-Text (Join-Path $depot "$($codDepotIds[0])_222.manifest") | Should -Be 'new manifest'
+        Should -Invoke Download-WithProgress -Times 0
+    }
+
     It 'keeps non-ASCII text in the appmanifest intact' {
         $acf = Join-Path $steam 'steamapps\appmanifest_1938090.acf'
         $null = New-Item -ItemType Directory -Path (Split-Path $acf -Parent) -Force
@@ -832,5 +955,195 @@ Describe 'Administrator hand-off folder' {
     It 'quotes paths so a trailing backslash cannot escape the quote' {
         ConvertTo-QuotedArgument 'C:\Users\Some One' | Should -BeExactly '"C:\Users\Some One"'
         ConvertTo-QuotedArgument 'D:\' | Should -BeExactly '"D:\\"'
+    }
+
+    It 'reads the worker id without -Since too' {
+        Write-WorkerHandshake -Method Normal
+        Get-WorkerHandshakePid | Should -Be $PID
+    }
+}
+
+Describe 'Pinned checksums of release files' {
+    It 'has a SHA-256 for every file the utility downloads' {
+        $names = @($ZipFileName, ($LuaDownloadUrl -split '/')[-1], ($ZipDownloadUrl -split '/')[-1])
+        foreach ($pack in $LanguagePacks.Values) { $names += @($pack.Assets) }
+        foreach ($name in $names) { Get-ReleaseAssetHash $name | Should -Match '^[0-9a-f]{64}$' -Because $name }
+    }
+
+    It 'looks up the hash of a release URL' {
+        Get-ExpectedDownloadHash -Url $ZipUrl | Should -Be (Get-ReleaseAssetHash $ZipFileName)
+    }
+
+    It 'refuses a release file that has no pinned hash' {
+        { Get-ExpectedDownloadHash -Url 'https://github.com/LarkTheStar/fix-installer/releases/download/1.0.0/unknown.zip' } | Should -Throw '*No pinned checksum*'
+    }
+
+    It 'does not ask for a hash outside this repository''s releases' {
+        Get-ExpectedDownloadHash -Url 'https://example.com/file.zip' | Should -Be ''
+    }
+}
+
+Describe 'Downloads: retries, resume and checksum' {
+    BeforeAll {
+        $payload = [byte[]]::new(300000)
+        (New-Object Random 7).NextBytes($payload)
+        $payloadHash = Get-BytesSha256 $payload
+    }
+    BeforeEach {
+        $target = Join-Path $TestDrive ('download-' + [guid]::NewGuid().ToString('N') + '.bin')
+        Mock Write-Host { }
+        Mock Write-Progress { }
+        $server = $null
+    }
+    AfterEach { if ($server) { Stop-TestHttpServer $server } }
+
+    It 'downloads and verifies a file' {
+        $server = Start-TestHttpServer -Content $payload
+        Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 $payloadHash -RetryDelaySeconds 0 | Should -Be $payload.Length
+        Get-BytesSha256 ([IO.File]::ReadAllBytes($target)) | Should -Be $payloadHash
+    }
+
+    It 'continues from the bytes already received after a dropped connection' {
+        $server = Start-TestHttpServer -Content $payload -FailRequests 1 -FailAfterBytes 100000
+        Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 $payloadHash -RetryDelaySeconds 0 | Should -Be $payload.Length
+        Get-BytesSha256 ([IO.File]::ReadAllBytes($target)) | Should -Be $payloadHash
+        $server.State.Requests | Should -Be 2
+        $server.State.Ranges[1] | Should -Be 100000
+    }
+
+    It 'starts over when the server ignores the resume request' {
+        $server = Start-TestHttpServer -Content $payload -FailRequests 1 -FailAfterBytes 100000 -NoRange
+        Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 $payloadHash -RetryDelaySeconds 0 | Should -Be $payload.Length
+        Get-BytesSha256 ([IO.File]::ReadAllBytes($target)) | Should -Be $payloadHash
+    }
+
+    It 'gives up after the last attempt and leaves no partial file' {
+        $server = Start-TestHttpServer -Content $payload -FailRequests 10 -FailAfterBytes 1000
+        # Windows PowerShell reports a short read ("incomplete"), PowerShell 7 a read
+        # error ("ended prematurely"); either way it is a failed download.
+        { Download-FileWithProgress -Url $server.Url -Destination $target -Label 'test' -RetryDelaySeconds 0 } | Should -Throw 'Download failed:*'
+        $server.State.Requests | Should -Be 4
+        Test-Path -LiteralPath $target | Should -BeFalse
+    }
+
+    It 'deletes a download that does not match its checksum' {
+        $server = Start-TestHttpServer -Content $payload
+        { Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 ('0' * 64) -RetryDelaySeconds 0 } | Should -Throw '*does not match its published checksum*'
+        Test-Path -LiteralPath $target | Should -BeFalse
+    }
+
+    It 'checks the downgrade downloader against the pinned hash too' {
+        $server = Start-TestHttpServer -Content $payload
+        Mock Get-ExpectedDownloadHash { '1' * 64 }
+        { Download-WithProgress -Url $server.Url -OutFile $target -Activity 'test' -RetryDelaySeconds 0 } | Should -Throw '*does not match*'
+        Test-Path -LiteralPath $target | Should -BeFalse
+    }
+}
+
+Describe 'Downgrade order: check, download, then revert the fix' {
+    BeforeEach {
+        $game = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('game-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $game 'a.txt') -Value 'original'
+        $fixZip = Join-Path $TestDrive 'fix.zip'
+        Remove-Item -LiteralPath $fixZip -Force -ErrorAction SilentlyContinue
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed' })
+        $steam = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('steam-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $steam 'steam.exe') -Value 'fake'
+        $null = New-Item -ItemType Directory -Path (Join-Path $steam 'config\stplug-in') -Force
+
+        Mock Select-TargetFolder { $game }
+        Mock Resolve-GameFolderQuiet { $game }
+        Mock Download-FileWithProgress { Copy-Item -LiteralPath $fixZip -Destination $Destination }
+        Mock Get-SteamInstallationPath { $steam }
+        Mock Test-IsElevated { $true }
+        Mock Get-Service { }
+        Mock Get-Process { }
+        Mock Start-Sleep { }
+        Mock Start-Process { }
+        Mock Write-Host { }
+        Mock Add-LogEntry { }
+        Mock Read-Host { $global:CodhqTestAnswers.Dequeue() }
+        Mock Invoke-SteamDowngrade { }
+        Set-Answers 'y'
+        Install-Fix
+    }
+
+    It 'stops before the fix is touched when a download fails' {
+        Mock Download-WithProgress { throw 'network down' }
+        { Invoke-DowngradeWithElevation -Method Normal } | Should -Throw '*network down*'
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+        Should -Invoke Invoke-SteamDowngrade -Times 0
+    }
+
+    It 'hands the downloaded files to the downgrade after reverting the fix' {
+        Mock Download-WithProgress { Set-Content -LiteralPath $OutFile -Value "downloaded $Activity" }
+        Set-Answers 'y'
+        Invoke-DowngradeWithElevation -Method Normal
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Should -Invoke Invoke-SteamDowngrade -Times 1 -ParameterFilter { $null -ne $Prefetched -and $Prefetched.Lua -like '*1938090_25909941.lua' }
+        @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'codhq-prefetch-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-1) }).Count | Should -Be 0
+    }
+}
+
+Describe 'Sandbox mode' {
+    BeforeEach {
+        $sandbox = Join-Path $TestDrive ('sandbox-' + [guid]::NewGuid().ToString('N'))
+        $starter = Join-Path $PSScriptRoot 'Start-Sandbox.ps1'
+        Mock Write-Host { }
+        Mock Get-Process { }
+        Mock Stop-Process { }
+        Mock Start-Process { }
+        Mock Start-Sleep { }
+    }
+    AfterEach { $global:SandboxRoot = '' }
+
+    It 'builds a sandbox with the marker, a fake Steam and a fake game' {
+        $output = & $starter -Path $sandbox -NoLaunch
+        Test-Path -LiteralPath (Join-Path $sandbox '.codhq-sandbox') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $sandbox 'Steam\steam.exe') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $sandbox 'Steam\config\stplug-in\1938090.lua') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $sandbox 'Game\sp26\steam_settings\configs.user.ini') | Should -BeTrue
+        ($output -join "`n") | Should -Match 'Sandbox created'
+        (& $starter -Path $sandbox -Report) -join "`n" | Should -Match '1938090\.lua'
+    }
+
+    It 'refuses to reset a folder that is not a sandbox' {
+        $null = New-Item -ItemType Directory -Path $sandbox -Force
+        Set-Content -LiteralPath (Join-Path $sandbox 'precious.txt') -Value 'keep me'
+        { & $starter -Path $sandbox -Reset -NoLaunch } | Should -Throw '*no .codhq-sandbox marker*'
+        Test-Path -LiteralPath (Join-Path $sandbox 'precious.txt') | Should -BeTrue
+    }
+
+    It 'only sees the sandbox Steam and never closes, starts or waits for the real one' {
+        $null = & $starter -Path $sandbox -NoLaunch
+        $global:SandboxRoot = $sandbox
+        Get-SteamInstallationPath | Should -Be (Join-Path $sandbox 'Steam')
+        @(Get-SteamLibraries) | Should -Be @((Join-Path $sandbox 'Steam'))
+        Get-SteamClientProcess | Should -BeNullOrEmpty
+        Start-SteamClient -SteamExe (Join-Path $sandbox 'Steam\steam.exe')
+        Start-SteamValidation
+        Wait-SteamReady
+        Should -Invoke Get-Process -Times 0
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It 'runs a whole Nuclear downgrade inside the sandbox without BetterSteamTools' {
+        $null = & $starter -Path $sandbox -NoLaunch
+        $global:SandboxRoot = $sandbox
+        $manifestZip = Join-Path $TestDrive 'sandbox-manifests.zip'
+        Remove-Item -LiteralPath $manifestZip -Force -ErrorAction SilentlyContinue
+        New-TestZip -Path $manifestZip -Entries ([ordered]@{ "depotcache/$($codDepotIds[0])_222.manifest" = 'new manifest' })
+        Mock Download-WithProgress { if ($Url -eq $LuaDownloadUrl) { Set-Content -LiteralPath $OutFile -Value 'new lua' } else { Copy-Item -LiteralPath $manifestZip -Destination $OutFile } }
+        Mock Invoke-RestMethod { throw 'must not download BetterSteamTools' }
+        Mock Invoke-ExternalPowerShellScript { throw 'must not run BetterSteamTools' }
+        Mock Write-Warning { }
+        Invoke-SteamDowngrade -Method Nuclear
+        Get-Text (Join-Path $sandbox 'Steam\config\stplug-in\1938090.lua') | Should -Be 'new lua'
+        Test-Path -LiteralPath (Join-Path $sandbox 'Steam\logs') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $sandbox 'Steam\userdata\keep.txt') | Should -BeTrue
+        Should -Invoke Invoke-ExternalPowerShellScript -Times 0
+        Should -Invoke Start-Process -Times 0
+        Get-Text (Join-Path $sandbox 'Steam\steamapps\appmanifest_1938090.acf') | Should -Match '"StateFlags"\s+"4"'
     }
 }

@@ -71,11 +71,23 @@ can never be mistaken for the real originals later. Backups have no size limit.
 Downloaded copies of the utility in `%TEMP%` (`codhq-setup-*.ps1`) are deleted when
 the window closes; any left by a crash are removed a day later.
 
-**Network access:** GitHub releases (fix archive and downgrade manifests) and
-`ps.lua.tools` (only during the Nuclear downgrade, to install BetterSteamTools).
-Removing the fix needs no network, except for backups made by versions from before
-the backup record existed: for those the fix archive is downloaded once to learn which
-files it installed.
+Removing the fix also deletes the folders the fix created, once they are empty.
+
+**Network access:** GitHub releases (fix archive, language packs and downgrade
+manifests) and `ps.lua.tools` (only during the Nuclear downgrade, to install
+BetterSteamTools). Removing the fix needs no network, except for backups made by
+versions from before the backup record existed: for those the fix archive is
+downloaded once and compared file by file, so only files that are exactly the fix's
+are deleted, each original is taken from the oldest backup that really holds one, and
+anything else is left alone and listed in the log.
+
+**Every download is checked.** Each file from this repository's releases has its
+SHA-256 written into `install.ps1` (`Get-ReleaseAssetHash`); a download that does not
+match is deleted and nothing is installed from it. A dropped connection is retried up
+to four times, continuing from the bytes already received, so a multi-gigabyte
+language pack does not start over. After replacing a release file, run
+`tools\Get-ReleaseHashes.ps1` and paste its output into `Get-ReleaseAssetHash` in the
+same commit; until then the utility refuses the new file.
 
 ## The Nuclear downgrade
 
@@ -93,7 +105,9 @@ missing.
 `steam.exe`, and the Normal downgrade also needs `config\stplug-in` (SteamTools or
 BetterSteamTools). This is checked before the UAC prompt and again in the
 administrator window; if anything is missing, the downgrade stops there and nothing
-is changed.
+is changed. The version-locked Lua file and manifests are then downloaded (and
+checked) before anything else happens, so a network problem also stops the downgrade
+while your fix and Steam are still untouched.
 
 **Both downgrades then undo an applied fix.** If `og files` is present, you are asked
 to confirm, the originals recorded in its backups are put back, and then the whole
@@ -170,9 +184,11 @@ applies to every script you find online, including this one.
 `tests\` holds Pester 5 tests for the parts that work on files: settings, the fix
 install and removal (including backup records, failed installs and backups from older
 versions), language packs, the `configs.user.ini` edits, ZIP path checks, the
-downgrade's checks before it starts, its Lua/manifest backup and restore, the
-out-of-process script runner and the administrator hand-off folder. Downloads, Steam,
-services, processes and prompts are mocked, so running them touches nothing on your PC.
+downgrade's checks before it starts and its download-first order, its Lua/manifest
+backup and restore, the out-of-process script runner, the administrator hand-off
+folder, sandbox mode, and the downloader itself (retries, resume and checksums, against
+a small local test server). Steam, services, processes and prompts are mocked, so
+running them touches nothing on your PC.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
@@ -181,20 +197,37 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Xaml.ps1
 ```
 
 GitHub Actions runs all of it on every push, under both Windows PowerShell 5.1 and
-PowerShell 7, and also checks that the window layout loads.
+PowerShell 7, checks that the window layout loads, and runs the window test below.
 
 `tests\Test-Gui.ps1` starts the real window from a temp copy and drives it with UI
 Automation: every page, the theme and accent switches, the activity log, and the
-cleanup of temp copies. It needs a desktop session, so it runs on your PC only, and
-the mouse moves while it clicks the sidebar. It presses no action buttons and puts
-`settings.json` back afterwards.
+cleanup of temp copies. It needs a desktop session, and the mouse moves while it
+clicks the sidebar. It presses no action buttons and puts `settings.json` back
+afterwards.
 
 ```powershell
 powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Gui.ps1
 ```
 
-UAC, the administrator hand-back and real Steam still need a manual run before a
-release.
+### Sandbox: testing a real downgrade and the UAC hand-off safely
+
+`tests\Start-Sandbox.ps1` builds a sandbox in `%TEMP%\codhq-sandbox` - a fake Steam
+folder, a fake game folder and a private settings folder - and starts the utility
+against it with `-Sandbox`. The title ends in **[SANDBOX]**, and in that window every
+button really runs, including both downgrades, the UAC prompt and the administrator
+window, but only the sandbox changes: Steam is never closed or started,
+BetterSteamTools is not installed, and settings, hand-off files and logs stay in the
+sandbox. Downloads are real, so the checksums and the network side are tested too.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Start-Sandbox.ps1          # build and start
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Start-Sandbox.ps1 -Report  # what changed
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Start-Sandbox.ps1 -Reset   # start over
+```
+
+To test the hand-off with a second administrator account, run it from the normal
+account and type the other account's password at the UAC prompt. A real downgrade
+against real Steam still needs a manual run before a release.
 
 ## Version
 
