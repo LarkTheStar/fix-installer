@@ -1,5 +1,5 @@
 # Starts the real utility and drives its window with Windows UI Automation. Windows
-# only, and needs a desktop session (it is not run by CI):
+# only, and needs a desktop session (GitHub's Windows runners have one, so CI runs it):
 #
 #   powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-Gui.ps1
 #
@@ -7,8 +7,12 @@
 # %TEMP%\codhq-setup-<guid>.ps1 copy), then checks:
 #   - copies left by older runs are cleaned up at startup, recent ones are kept;
 #   - every page opens, the theme and accent switch, the log shows the ready line;
-#   - closing the window deletes its own temp copy.
-# No action button is pressed, so the game and Steam folders are never touched.
+#   - closing the window deletes its own temp copy;
+#   - the administrator window (started without UAC, against a throwaway sandbox,
+#     so no real Steam or game is touched) appears on screen, runs a Normal
+#     downgrade with real downloads, reports its result and closes on OK.
+# No action button is pressed in the normal window, so the real game and Steam
+# folders are never touched.
 # settings.json is backed up first and put back afterwards.
 
 param([int]$TimeoutSeconds = 60)
@@ -85,6 +89,8 @@ $copy = Join-Path $temp (& $newName)
 $stale = Join-Path $temp (& $newName)
 $recent = Join-Path $temp (& $newName)
 $process = $null
+$worker = $null
+$sandbox = $null
 try {
     Copy-Item -LiteralPath $scriptPath -Destination $copy
     Set-Content -LiteralPath $stale -Value '# stale copy'
@@ -156,11 +162,48 @@ try {
     $windowPattern.Close()
     Check 'the app exits when the window is closed' ($process.WaitForExit(15000))
     Check 'closing the window deletes its temp copy' (Wait-Until -Seconds 5 { -not (Test-Path -LiteralPath $copy) })
+
+    # The administrator window, started the way the UAC hand-off starts it (without
+    # UAC: elevation is not what is tested here), running a Normal downgrade in a
+    # sandbox, so no real Steam or game is touched. The downloads are real. Its window
+    # must actually appear: a log line written before the window opened once ran the
+    # whole downgrade first, so only its closing message box was ever seen.
+    $sandbox = Join-Path $temp ('codhq-gui-sandbox-' + [guid]::NewGuid().ToString('N'))
+    & (Join-Path $PSScriptRoot 'Start-Sandbox.ps1') -Path $sandbox -NoLaunch | Out-Null
+    $worker = Start-Process powershell.exe -PassThru -ArgumentList "-NoProfile -STA -ExecutionPolicy Bypass -File `"$scriptPath`" -RunDowngradeOnly -DowngradeMethod Normal -Sandbox `"$sandbox`""
+    $workerWindowSeen = $false
+    $resultBox = $null
+    $resultCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new($AE::ProcessIdProperty, $worker.Id),
+        [System.Windows.Automation.PropertyCondition]::new($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Window),
+        [System.Windows.Automation.PropertyCondition]::new($AE::NameProperty, 'Normal downgrade finished'))
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(120, $TimeoutSeconds))
+    while ([DateTime]::UtcNow -lt $deadline -and $null -eq $resultBox) {
+        foreach ($candidate in @($AE::RootElement.FindAll($TS::Children, [System.Windows.Automation.PropertyCondition]::new($AE::ProcessIdProperty, $worker.Id)))) {
+            if ($candidate.Current.Name -like 'Call of Duty MW4 Setup Utility*Administrator*' -and -not $candidate.Current.IsOffscreen -and $candidate.Current.BoundingRectangle.Width -gt 400) { $workerWindowSeen = $true }
+        }
+        $resultBox = $AE::RootElement.FindFirst($TS::Descendants, $resultCondition)
+        if ($null -eq $resultBox) { Start-Sleep -Milliseconds 200 }
+    }
+    Check 'the administrator window appears on screen' $workerWindowSeen
+    Check 'the administrator window reports its result' ($null -ne $resultBox)
+    if ($null -ne $resultBox) {
+        # The box has only OK, so closing it is pressing OK: the hand-back.
+        $resultBox.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
+        Check 'the administrator window closes after OK' ($worker.WaitForExit(15000))
+        $lastRun = $null
+        try { $lastRun = Get-Content -LiteralPath (Join-Path $sandbox 'Settings\last-run.json') -Raw | ConvertFrom-Json } catch { $lastRun = $null }
+        Check 'the result is written for the window that started it' ($null -ne $lastRun -and $lastRun.State -eq 'Ready')
+        $lua = Join-Path $sandbox 'Steam\config\stplug-in\1938090.lua'
+        Check 'the sandbox Lua file was replaced by the version-locked one' ((Test-Path -LiteralPath $lua) -and ([IO.File]::ReadAllText($lua) -notmatch 'old lua'))
+    }
 } catch {
     $failures.Add("unexpected error: $($_.Exception.Message)")
     Write-Output "[FAIL] unexpected error: $($_.Exception.Message)"
 } finally {
     if ($process -and -not $process.HasExited) { try { $process.Kill() } catch { } }
+    if ($worker -and -not $worker.HasExited) { try { $worker.Kill() } catch { } }
+    if ($sandbox -and (Test-Path -LiteralPath (Join-Path $sandbox '.codhq-sandbox'))) { Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
     foreach ($leftover in @($copy, $stale, $recent)) { Remove-Item -LiteralPath $leftover -Force -ErrorAction SilentlyContinue }
     if ($null -ne $settingsBackup) { [IO.File]::WriteAllBytes($settingsFile, $settingsBackup) }
     elseif (Test-Path -LiteralPath $settingsFile) { Remove-Item -LiteralPath $settingsFile -Force }

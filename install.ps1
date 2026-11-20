@@ -4390,6 +4390,15 @@ $global:StatusDot = $window.FindName("StatusDot")
 $global:StatusPill = $window.FindName("StatusPill")
 $global:BusyText = $window.FindName("BusyText")
 $global:MainWindow = $window
+# No UI pumping until the window has loaded. A pump is a nested dispatcher frame,
+# and it runs whatever is already queued - including the administrator window's
+# downgrade, which is queued to start once the window is on screen. A log line
+# written before ShowDialog used to pump, so the whole downgrade ran before its
+# window ever appeared and only the closing message box was seen. Loaded has a
+# higher priority than that queued work, so the work still starts afterwards and
+# still updates the log live.
+$global:SuppressUiPump = $true
+$window.Add_Loaded({ $global:SuppressUiPump = $false })
 # One source of truth for the version: the sidebar reads it from $AppVersion.
 $window.FindName('VersionText').Text = 'v' + $AppVersion
 $window.Add_SourceInitialized({ Enable-DarkTitleBar -TargetWindow $window -Dark:($global:ThemeName -eq 'dark') })

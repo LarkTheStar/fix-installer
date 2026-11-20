@@ -50,11 +50,15 @@ function Show-SandboxReport {
         if ($files.Count -eq 0) { Write-Output '  (empty)' }
         foreach ($file in $files) {
             $relative = $file.FullName.Substring($root.Length + 1)
+            # Short text files are shown inline; binary ones (real Steam manifests) are not.
             $preview = ''
             if ($file.Length -le 200) {
-                $preview = ([IO.File]::ReadAllText($file.FullName) -replace '\s+', ' ').Trim()
-                if ($preview.Length -gt 60) { $preview = $preview.Substring(0, 60) + '...' }
-                $preview = " : $preview"
+                $bytes = [IO.File]::ReadAllBytes($file.FullName)
+                if (-not ($bytes | Where-Object { $_ -lt 9 -or ($_ -gt 13 -and $_ -lt 32) -or $_ -gt 126 } | Select-Object -First 1)) {
+                    $preview = ([Text.Encoding]::ASCII.GetString($bytes) -replace '\s+', ' ').Trim()
+                    if ($preview.Length -gt 60) { $preview = $preview.Substring(0, 60) + '...' }
+                    $preview = " : $preview"
+                }
             }
             Write-Output ("  {0}  ({1:N0} bytes){2}" -f $relative, $file.Length, $preview)
         }
@@ -84,7 +88,7 @@ if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
     Write-SandboxFile 'Steam\steam.exe' 'fake steam.exe (sandbox)'
     Write-SandboxFile 'Steam\config\stplug-in\1938090.lua' '-- old lua (sandbox)'
     Write-SandboxFile 'Steam\depotcache\1938091_1111111111111111111.manifest' 'old manifest for this game (sandbox)'
-    Write-SandboxFile 'Steam\depotcache\999999_1.manifest' 'manifest of another game (sandbox) - must survive'
+    Write-SandboxFile 'Steam\depotcache\999999_1.manifest' 'manifest of another game (sandbox) - Normal keeps it; Nuclear deletes all of depotcache'
     Write-SandboxFile 'Steam\steamapps\appmanifest_1938090.acf' ("`"AppState`"`n{`n`t`"appid`"`t`t`"1938090`"`n`t`"name`"`t`t`"Call of Duty HQ`"`n`t`"StateFlags`"`t`t`"6`"`n`t`"installdir`"`t`t`"Call of Duty HQ`"`n`t`"SizeOnDisk`"`t`t`"123456`"`n`t`"buildid`"`t`t`"20000000`"`n`t`"BytesToDownload`"`t`t`"5`"`n`t`"BytesDownloaded`"`t`t`"1`"`n`t`"UpdateResult`"`t`t`"2`"`n}`n")
     Write-SandboxFile 'Steam\userdata\keep.txt' 'kept by Nuclear (sandbox)'
     Write-SandboxFile 'Steam\logs\deleted-by-nuclear.txt' 'deleted by Nuclear (sandbox)'
