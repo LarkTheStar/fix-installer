@@ -2,7 +2,13 @@ param(
     [switch]$RunDowngradeOnly,
     # Which downgrade the elevated relaunch must run. The relaunch used to pass only
     # -RunDowngradeOnly, so a Nuclear relaunch silently ran Normal instead.
-    [ValidateSet('Normal', 'Nuclear')][string]$DowngradeMethod = 'Normal'
+    [ValidateSet('Normal', 'Nuclear')][string]$DowngradeMethod = 'Normal',
+    # Passed to the administrator window by the window that started it. When the
+    # administrator is a different account, its own %LOCALAPPDATA% and saved game
+    # folder are not the user's, so the hand-off files go to the folder named here
+    # and the downgrade uses the game folder the user's window was using.
+    [string]$HandoffDirectory = '',
+    [string]$GameFolder = ''
 )
 
 # ==========================================
@@ -37,6 +43,15 @@ function ConvertTo-ScriptText {
         try { return ([System.Text.Encoding]::UTF8.GetString($Content)).TrimStart([char]0xFEFF) } catch { return '' }
     }
     return ([string]$Content).TrimStart([char]0xFEFF)
+}
+
+# Quotes a path for a powershell.exe command line. A trailing backslash would escape
+# the closing quote ("C:\" -> C:"), so trailing backslashes are doubled.
+function ConvertTo-QuotedArgument {
+    param([string]$Value)
+    $trimmed = $Value.TrimEnd('\')
+    $trailing = $Value.Length - $trimmed.Length
+    return '"' + $trimmed + ('\' * ($trailing * 2)) + '"'
 }
 
 # "irm ... | iex" saves a copy of this script as %TEMP%\codhq-setup-<guid>.ps1 and
@@ -117,6 +132,8 @@ if ($needsOwnProcess -or $needsSta) {
         $forwarded = ''
         if ($PSBoundParameters.ContainsKey('RunDowngradeOnly')) { $forwarded += ' -RunDowngradeOnly' }
         if ($PSBoundParameters.ContainsKey('DowngradeMethod')) { $forwarded += " -DowngradeMethod $DowngradeMethod" }
+        if (-not [string]::IsNullOrWhiteSpace($HandoffDirectory)) { $forwarded += ' -HandoffDirectory ' + (ConvertTo-QuotedArgument $HandoffDirectory) }
+        if (-not [string]::IsNullOrWhiteSpace($GameFolder)) { $forwarded += ' -GameFolder ' + (ConvertTo-QuotedArgument $GameFolder) }
         Start-Process powershell.exe -ArgumentList "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launchFile`"$forwarded"
         return
     }
@@ -196,6 +213,24 @@ $AppManifestFile    = "appmanifest_1938090.acf"
 # (or a later PowerShell session) starts.
 $SettingsDirectory  = Join-Path $env:LOCALAPPDATA 'CallOfDutyHQ-SetupUtility'
 $SettingsFile       = Join-Path $SettingsDirectory 'settings.json'
+
+# Where worker.json, last-run.json and the downgrade logs go (see Get-HandoffDirectory).
+# Worked out in a local first: when the script runs in the global scope (the
+# in-session fallback), the parameter and the global are the same variable.
+$handoffValue = ''
+if (-not [string]::IsNullOrWhiteSpace($HandoffDirectory)) {
+    try { if ([IO.Path]::IsPathRooted($HandoffDirectory)) { $handoffValue = [IO.Path]::GetFullPath($HandoffDirectory).TrimEnd('\') } }
+    catch { $handoffValue = '' }
+}
+$global:HandoffDirectory = $handoffValue
+# The game folder the starting window used; Resolve-GameFolderQuiet and
+# Select-TargetFolder take it before the (possibly different account's) settings.
+if (-not [string]::IsNullOrWhiteSpace($GameFolder)) {
+    $passedFolder = $null
+    try { $passedFolder = [IO.Path]::GetFullPath($GameFolder.Trim().Trim('"')).TrimEnd('\') }
+    catch { $passedFolder = $null }
+    if ($passedFolder -and (Test-Path -LiteralPath $passedFolder -PathType Container)) { $global:SessionGameFolder = $passedFolder }
+}
 
 # ==========================================
 # THEMES
@@ -4561,8 +4596,17 @@ function Write-LastWorkerResult {
             LogPath    = [string]$LogPath
             FinishedAt = (Get-Date).ToString('o')
         }
-        [IO.File]::WriteAllText((Join-Path $SettingsDirectory 'last-run.json'), ($result | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path (Get-HandoffDirectory) 'last-run.json'), ($result | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     } catch { }
+}
+
+# Folder shared by the two windows of a downgrade: the one passed with
+# -HandoffDirectory (the starting window's own settings folder), otherwise this
+# account's settings folder, exactly as before.
+function Get-HandoffDirectory {
+    $handoff = [string]$global:HandoffDirectory
+    if (-not [string]::IsNullOrWhiteSpace($handoff)) { return $handoff }
+    return $SettingsDirectory
 }
 
 # Reports the administrator run's outcome in this window, including where its log
@@ -4571,11 +4615,11 @@ function Write-LastWorkerResult {
 function Show-LastWorkerResult {
     param([string]$Method = 'Normal', [DateTime]$StartedAt = [DateTime]::MinValue)
     $label = if ($Method -eq 'Nuclear') { 'Nuclear downgrade' } else { 'Normal downgrade' }
-    $logsDir = Join-Path $SettingsDirectory 'logs'
+    $logsDir = Join-Path (Get-HandoffDirectory) 'logs'
 
     $result = $null
     try {
-        $resultPath = Join-Path $SettingsDirectory 'last-run.json'
+        $resultPath = Join-Path (Get-HandoffDirectory) 'last-run.json'
         if (Test-Path -LiteralPath $resultPath -PathType Leaf) { $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }
     } catch { $result = $null }
 
@@ -4611,7 +4655,7 @@ function Show-LastWorkerResult {
 # RunAs -PassThru" does not reliably hand back that window's process: it can return
 # the shell's elevation stub, which exits immediately. Watching the stub woke this
 # window while the administrator one was still on screen, so two windows sat there.
-function Get-WorkerHandshakePath { return (Join-Path $SettingsDirectory 'worker.json') }
+function Get-WorkerHandshakePath { return (Join-Path (Get-HandoffDirectory) 'worker.json') }
 
 function Clear-WorkerHandshake {
     try {
@@ -4623,7 +4667,8 @@ function Clear-WorkerHandshake {
 function Write-WorkerHandshake {
     param([string]$Method = 'Normal')
     try {
-        if (-not (Test-Path -LiteralPath $SettingsDirectory -PathType Container)) { $null = New-Item -ItemType Directory -Path $SettingsDirectory -Force }
+        $handoffDirectory = Get-HandoffDirectory
+        if (-not (Test-Path -LiteralPath $handoffDirectory -PathType Container)) { $null = New-Item -ItemType Directory -Path $handoffDirectory -Force }
         $payload = [ordered]@{ Pid = $PID; Method = $Method; StartedAt = (Get-Date).ToString('o') }
         [IO.File]::WriteAllText((Get-WorkerHandshakePath), ($payload | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     } catch { }
@@ -4768,7 +4813,13 @@ Run the Nuclear downgrade now? [y/N]
         # Any handshake file belongs to an earlier run; the worker writes its own.
         Clear-WorkerHandshake
         # -DowngradeMethod keeps the chosen method across the elevation boundary.
-        $elevated = Start-Process powershell.exe -Verb RunAs -PassThru -ArgumentList "-NoProfile -STA -ExecutionPolicy Bypass -File `"$scriptPath`" -RunDowngradeOnly -DowngradeMethod $Method"
+        # -HandoffDirectory and -GameFolder: the administrator may be another account,
+        # whose settings folder and saved game folder are not this user's.
+        $handoffArguments = ' -HandoffDirectory ' + (ConvertTo-QuotedArgument (Get-HandoffDirectory))
+        $folderInUse = $null
+        try { $folderInUse = Resolve-GameFolderQuiet } catch { $folderInUse = $null }
+        if ($folderInUse) { $handoffArguments += ' -GameFolder ' + (ConvertTo-QuotedArgument $folderInUse) }
+        $elevated = Start-Process powershell.exe -Verb RunAs -PassThru -ArgumentList ("-NoProfile -STA -ExecutionPolicy Bypass -File `"$scriptPath`" -RunDowngradeOnly -DowngradeMethod $Method" + $handoffArguments)
         # The elevated instance is the one that runs the downgrade, and it shows its
         # own window with the live log. This window hides rather than closes, so it
         # can come back with the result once the administrator window is gone.
@@ -4869,7 +4920,7 @@ function Complete-DowngradeRunChrome {
 
         $savedPath = $null
         try {
-            $logDir = Join-Path $SettingsDirectory 'logs'
+            $logDir = Join-Path (Get-HandoffDirectory) 'logs'
             if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { $null = New-Item -ItemType Directory -Path $logDir -Force }
             $savedPath = Join-Path $logDir ('downgrade-' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '.txt')
             [IO.File]::WriteAllText($savedPath, (Get-ReportText), [Text.UTF8Encoding]::new($true))
