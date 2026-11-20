@@ -690,6 +690,12 @@ function Download-FileWithProgress {
         Write-Ok ("Download complete: {0:N1} MB" -f ($downloaded / 1MB))
     } catch {
         Write-Progress -Activity $Label -Completed
+        # Close the file first: an open file cannot be deleted, and the partial
+        # download would be left behind.
+        if ($outputStream) {
+            try { $outputStream.Dispose() } catch { Write-Verbose "Could not close the partial download: $($_.Exception.Message)" }
+            $outputStream = $null
+        }
         if (Test-Path -LiteralPath $Destination -PathType Leaf) { Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue }
         throw "Download failed: $($_.Exception.Message)"
     } finally {
@@ -1735,29 +1741,192 @@ function Download-WithProgress {
     } finally { $fileStream.Close(); $stream.Close(); $response.Close(); Write-Progress -Activity $Activity -Completed }
 }
 
+# Extracts the downgrade's manifest ZIP into the Steam folder. Every entry is
+# checked before anything is written (same rules as the fix ZIP, and every target
+# must stay inside the Steam folder). With -Journal and -BackupDirectory, a file
+# about to be overwritten is moved to the backup first and every change is written
+# to the journal, so Undo-ZipExtraction can put the Steam folder back exactly.
 function Expand-ZipOverwrite {
-    param([string]$ZipPath, [string]$DestinationPath)
+    param(
+        [string]$ZipPath,
+        [string]$DestinationPath,
+        [System.Collections.Generic.List[object]]$Journal = $null,
+        [string]$BackupDirectory = ''
+    )
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     if (-not (Test-Path $DestinationPath)) { New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null }
+    $destRoot = [IO.Path]::GetFullPath($DestinationPath).TrimEnd('\', '/')
+    $destPrefix = $destRoot + [IO.Path]::DirectorySeparatorChar
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
-    $total = $zip.Entries.Count; $current = 0
     try {
+        $planned = [System.Collections.Generic.List[object]]::new()
         foreach ($entry in $zip.Entries) {
-            $current++; $percent = [int][Math]::Floor(($current / $total) * 100)
-            Write-Progress -Activity "Extracting manifests" -Status $entry.FullName -PercentComplete $percent
             $entryPath = $entry.FullName -replace '/', '\'
             if ([string]::IsNullOrEmpty($entryPath)) { continue }
-            if ([string]::IsNullOrEmpty($entry.Name)) {
-                $dirPath = Join-Path $DestinationPath $entryPath
-                if (-not (Test-Path $dirPath)) { New-Item -ItemType Directory -Path $dirPath -Force | Out-Null }
-                continue
+            $isDirectory = [string]::IsNullOrEmpty($entry.Name)
+            $relative = (Get-ValidatedRelativePath $entry.FullName).TrimEnd('\')
+            if ([string]::IsNullOrEmpty($relative)) { continue }
+            $unixMode = ($entry.ExternalAttributes -shr 16) -band 0xF000
+            if ($unixMode -eq 0xA000) { Stop-Installer "ZIP contains a symbolic link, which is not allowed: $($entry.FullName)" }
+            $fullPath = [IO.Path]::GetFullPath((Join-Path $destRoot $relative))
+            if (-not $fullPath.StartsWith($destPrefix, [StringComparison]::OrdinalIgnoreCase)) { Stop-Installer "ZIP path escapes the Steam folder: $($entry.FullName)" }
+            if (-not $isDirectory) { Test-SafeGameDestination -TargetRoot $destRoot -Destination $fullPath }
+            $planned.Add([pscustomobject]@{ Entry = $entry; Relative = $relative; FullPath = $fullPath; IsDirectory = $isDirectory })
+        }
+
+        $total = $planned.Count; $current = 0
+        foreach ($item in $planned) {
+            $current++; $percent = [int][Math]::Floor(($current / [Math]::Max(1, $total)) * 100)
+            Write-Progress -Activity "Extracting manifests" -Status $item.Entry.FullName -PercentComplete $percent
+            $folder = if ($item.IsDirectory) { $item.FullPath } else { Split-Path $item.FullPath -Parent }
+            if (-not (Test-Path -LiteralPath $folder)) {
+                # Note every folder this creates (outermost first), so an undo can remove
+                # the ones that end up empty.
+                $missing = [System.Collections.Generic.List[string]]::new()
+                $walk = $folder
+                while ($walk -and -not (Test-Path -LiteralPath $walk)) { $missing.Insert(0, $walk); $walk = Split-Path $walk -Parent }
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+                if ($null -ne $Journal) { foreach ($dir in $missing) { $Journal.Add([pscustomobject]@{ Kind = 'Directory'; Path = $dir; Backup = $null }) } }
             }
-            $destFile = Join-Path $DestinationPath $entryPath
-            $destDir = Split-Path $destFile -Parent
-            if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destFile, $true)
+            if ($item.IsDirectory) { continue }
+            if ($null -ne $Journal -and -not [string]::IsNullOrEmpty($BackupDirectory)) {
+                if (Test-Path -LiteralPath $item.FullPath -PathType Leaf) {
+                    $backupPath = Join-Path $BackupDirectory $item.Relative
+                    $backupParent = Split-Path $backupPath -Parent
+                    if (-not (Test-Path -LiteralPath $backupParent)) { New-Item -ItemType Directory -Path $backupParent -Force | Out-Null }
+                    Move-Item -LiteralPath $item.FullPath -Destination $backupPath -Force -ErrorAction Stop
+                    $Journal.Add([pscustomobject]@{ Kind = 'Replaced'; Path = $item.FullPath; Backup = $backupPath })
+                } else {
+                    # Logged before the write, so a half-written file is removed too.
+                    $Journal.Add([pscustomobject]@{ Kind = 'Created'; Path = $item.FullPath; Backup = $null })
+                }
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($item.Entry, $item.FullPath, $true)
         }
     } finally { $zip.Dispose(); Write-Progress -Activity "Extracting manifests" -Completed }
+}
+
+# Reverses a journal written by Expand-ZipOverwrite, newest change first. Returns
+# $false when anything could not be put back (the backup is then kept by the caller).
+function Undo-ZipExtraction {
+    param([System.Collections.Generic.List[object]]$Journal)
+    $ok = $true
+    if ($null -eq $Journal) { return $ok }
+    for ($i = $Journal.Count - 1; $i -ge 0; $i--) {
+        $change = $Journal[$i]
+        try {
+            switch ($change.Kind) {
+                'Created' {
+                    if (Test-Path -LiteralPath $change.Path -PathType Leaf) { Remove-Item -LiteralPath $change.Path -Force -ErrorAction Stop }
+                }
+                'Replaced' {
+                    if (Test-Path -LiteralPath $change.Path -PathType Leaf) { Remove-Item -LiteralPath $change.Path -Force -ErrorAction Stop }
+                    Move-Item -LiteralPath $change.Backup -Destination $change.Path -Force -ErrorAction Stop
+                }
+                'Directory' {
+                    if ((Test-Path -LiteralPath $change.Path -PathType Container) -and -not (Get-ChildItem -LiteralPath $change.Path -Force | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $change.Path -Force -ErrorAction Stop
+                    }
+                }
+            }
+        } catch {
+            $ok = $false
+            Write-Warning "Could not undo an extracted file: $($change.Path)"
+        }
+    }
+    return $ok
+}
+
+# Checks what a downgrade needs before anything is changed - before the fix is
+# reverted and before the UAC prompt. Read-only. Returns the Steam folder.
+function Test-SteamDowngradeReadiness {
+    param([ValidateSet('Normal', 'Nuclear')][string]$Method = 'Normal')
+    $untouched = 'Nothing was changed: the fix and "og files" were left as they are.'
+    $steamRoot = Get-SteamInstallationPath
+    if (-not $steamRoot) { throw "Steam installation not found. $untouched" }
+    $steamExe = Join-Path -Path $steamRoot -ChildPath 'steam.exe'
+    if (-not (Test-Path -LiteralPath $steamExe -PathType Leaf)) { throw "steam.exe was not found in the Steam folder: $steamRoot. $untouched" }
+    # Nuclear installs BetterSteamTools and creates this folder if it is missing;
+    # Normal only writes into it.
+    if ($Method -eq 'Normal') {
+        $plugInDir = Join-Path -Path $steamRoot -ChildPath $SteamConfigSubPath
+        if (-not (Test-Path -LiteralPath $plugInDir -PathType Container)) {
+            throw "Folder not found: $plugInDir. The Normal downgrade needs SteamTools or BetterSteamTools to be installed (the Nuclear downgrade installs BetterSteamTools). $untouched"
+        }
+    }
+    return $steamRoot
+}
+
+# Runs a downloaded PowerShell script in its own powershell.exe, so its "exit",
+# its variables and its preference settings cannot reach this process. Its output
+# and errors are streamed into the activity log line by line while the window keeps
+# repainting. Stdin is closed, so a prompt cannot hang it; a run longer than
+# -TimeoutSeconds is stopped.
+function Invoke-ExternalPowerShellScript {
+    param(
+        [Parameter(Mandatory)][string]$ScriptText,
+        [Parameter(Mandatory)][string]$WorkRoot,
+        [string]$Name = 'external-script',
+        [int]$TimeoutSeconds = 600
+    )
+    if (-not (Test-Path -LiteralPath $WorkRoot -PathType Container)) { $null = New-Item -ItemType Directory -Path $WorkRoot -Force }
+    $scriptFile = Join-Path $WorkRoot ($Name + '.ps1')
+    # With a BOM, Windows PowerShell 5.1 reads the file as UTF-8 instead of ANSI.
+    [IO.File]::WriteAllText($scriptFile, $ScriptText, [Text.UTF8Encoding]::new($true))
+    $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $shell -PathType Leaf)) { $shell = 'powershell.exe' }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $shell
+    $startInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptFile`""
+    $startInfo.WorkingDirectory = $WorkRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $output = [System.Collections.Generic.List[string]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $timedOut = $false
+    $exitCode = $null
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        $process.StandardInput.Close()
+        $outTask = $process.StandardOutput.ReadLineAsync()
+        $errTask = $process.StandardError.ReadLineAsync()
+        $outDone = $false; $errDone = $false
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        while (-not ($outDone -and $errDone)) {
+            $gotLine = $false
+            if (-not $outDone -and $outTask.IsCompleted) {
+                $line = $outTask.Result
+                if ($null -eq $line) { $outDone = $true }
+                else { $output.Add($line); Add-LogEntry -Text $line -Color '#A0A0B0'; $outTask = $process.StandardOutput.ReadLineAsync() }
+                $gotLine = $true
+            }
+            if (-not $errDone -and $errTask.IsCompleted) {
+                $line = $errTask.Result
+                if ($null -eq $line) { $errDone = $true }
+                else { $errors.Add($line); Add-LogEntry -Text $line -Color '#FF4D4D'; $errTask = $process.StandardError.ReadLineAsync() }
+                $gotLine = $true
+            }
+            if ($gotLine) { continue }
+            if ([DateTime]::UtcNow -gt $deadline) {
+                $timedOut = $true
+                try { $process.Kill() } catch { Write-Verbose "The script exited before it could be stopped: $($_.Exception.Message)" }
+                break
+            }
+            Invoke-UiPump
+            [System.Threading.Thread]::Sleep(50)
+        }
+        if (-not $timedOut) {
+            [void]$process.WaitForExit(30000)
+            if ($process.HasExited) { $exitCode = $process.ExitCode }
+        }
+    } finally { $process.Dispose() }
+    return [pscustomobject]@{ ExitCode = $exitCode; TimedOut = $timedOut; Output = @($output.ToArray()); Errors = @($errors.ToArray()) }
 }
 
 function Wait-SteamReady {
@@ -1799,7 +1968,9 @@ function Invoke-SteamDowngrade {
     if (-not $steamRoot) { Write-Error "Steam installation not found."; return }
     Write-Host "Steam found at: $steamRoot" -ForegroundColor Green
     $plugInDir = Join-Path -Path $steamRoot -ChildPath $SteamConfigSubPath
-    if (-not (Test-Path $plugInDir -PathType Container)) { Write-Error "Folder not found: $plugInDir"; return }
+    # Normal needs the folder already; Nuclear installs BetterSteamTools first and
+    # creates the folder afterwards if it is still missing (see below).
+    if ($Method -ne "Nuclear" -and -not (Test-Path $plugInDir -PathType Container)) { Write-Error "Folder not found: $plugInDir"; return }
 
     if ($Method -eq "Nuclear") {
         Write-Host "`n=== INITIATING NUCLEAR METHOD ===" -ForegroundColor Magenta
@@ -1822,20 +1993,29 @@ function Invoke-SteamDowngrade {
         $steamProcesses = Get-Process -Name steam* -ErrorAction SilentlyContinue
         if ($steamProcesses) { $steamProcesses | Stop-Process -Force; Start-Sleep -Seconds 3 }
         Write-Host "`nDownloading BetterSteamTools (irm https://ps.lua.tools/install-ost.ps1 | iex)..." -ForegroundColor Yellow
+        # The installer runs in its own powershell.exe: it ends with "exit 1" when it
+        # fails, which inside this process would close the administrator window half
+        # way through the downgrade. Its output still appears in the log line by line.
+        $bstRoot = Join-Path $env:TEMP ('codhq-bst-' + [guid]::NewGuid().ToString('N'))
         try {
-            # Same execution as before (Invoke-Expression, same scope and error
-            # preference); the redirects only make the output visible in the log.
-            Invoke-Expression (Invoke-RestMethod -Uri "https://ps.lua.tools/install-ost.ps1") *>&1 | ForEach-Object {
-                if ($_ -is [System.Management.Automation.ErrorRecord]) { Add-LogEntry -Text (Format-ErrorRecord $_) -Color '#FF4D4D' }
-                elseif ($_ -is [System.Management.Automation.WarningRecord]) { Add-LogEntry -Text ('[WARN] ' + $_.Message) -Color '#FFD700' }
-                elseif ($null -ne $_) { Add-LogEntry -Text ([string]$_) -Color '#A0A0B0' }
-            }
+            $bstScript = ConvertTo-ScriptText (Invoke-RestMethod -Uri "https://ps.lua.tools/install-ost.ps1")
+            $bstRun = Invoke-ExternalPowerShellScript -ScriptText $bstScript -WorkRoot $bstRoot -Name 'install-ost' -TimeoutSeconds 600
+            if ($bstRun.TimedOut) { Write-Warning 'The BetterSteamTools installer did not finish within 10 minutes and was stopped. Continuing with the downgrade.' }
+            elseif ($bstRun.ExitCode -ne 0) { Write-Warning "The BetterSteamTools installer reported an error (exit code $($bstRun.ExitCode)). Continuing with the downgrade." }
+            else { Write-Ok 'BetterSteamTools installer finished.' }
         } catch { Write-Warning "Failed to run the installer script: $($_.Exception.Message)" }
+        finally { if (Test-Path -LiteralPath $bstRoot) { Remove-Item -LiteralPath $bstRoot -Recurse -Force -ErrorAction SilentlyContinue } }
         Write-Host "`nRestarting Steam (via BetterSteamTools)..." -ForegroundColor Yellow
         Start-Sleep -Seconds 2
         if (-not (Get-Process -Name steam -ErrorAction SilentlyContinue)) { Start-Process -FilePath $steamExe }
         Wait-SteamReady
         Write-Host "`nNuclear method phase complete. Proceeding to normal installation..." -ForegroundColor Magenta
+        # BetterSteamTools reads Lua files from config\stplug-in (its own config says
+        # so) but does not create that folder.
+        if (-not (Test-Path $plugInDir -PathType Container)) {
+            $null = New-Item -ItemType Directory -Path $plugInDir -Force
+            Write-Ok "Created $plugInDir, the folder BetterSteamTools reads Lua files from."
+        }
     }
 
     Write-Host "`nClosing all Steam processes..." -ForegroundColor Yellow
@@ -1853,6 +2033,8 @@ function Invoke-SteamDowngrade {
     $newLuaPath = Join-Path -Path $plugInDir -ChildPath $TargetFileName
     $movedLua = [System.Collections.Generic.List[object]]::new()
     $movedManifests = [System.Collections.Generic.List[object]]::new()
+    $extractJournal = [System.Collections.Generic.List[object]]::new()
+    $backupExtractDir = Join-Path $workRoot 'backup\extracted'
     $newLuaPlaced = $false
     $manifestsMoved = $false
     $null = New-Item -ItemType Directory -Path $backupLuaDir -Force
@@ -1899,7 +2081,7 @@ function Invoke-SteamDowngrade {
         Write-Host "`nDownloading manifests ZIP..." -ForegroundColor Yellow
         Download-WithProgress -Url $ZipDownloadUrl -OutFile $tempZip -Activity "Downloading manifests ZIP"
         Write-Host "Extracting downgrade manifests into Steam root: $steamRoot" -ForegroundColor Gray
-        Expand-ZipOverwrite -ZipPath $tempZip -DestinationPath $steamRoot
+        Expand-ZipOverwrite -ZipPath $tempZip -DestinationPath $steamRoot -Journal $extractJournal -BackupDirectory $backupExtractDir
         Write-Host "Downgrade manifests extracted successfully." -ForegroundColor Green
     } catch {
         Write-Warning "The new Lua file or manifests could not be installed. Restoring the previous ones..."
@@ -1909,6 +2091,8 @@ function Invoke-SteamDowngrade {
         if ($newLuaPlaced -and (Test-Path -LiteralPath $newLuaPath -PathType Leaf)) {
             try { Remove-Item -LiteralPath $newLuaPath -Force -ErrorAction Stop } catch { $restoreFailed = $true; Write-Warning "Could not remove the new Lua file: $newLuaPath" }
         }
+        # Every file the manifest ZIP wrote or overwrote, wherever in the Steam folder.
+        if (-not (Undo-ZipExtraction -Journal $extractJournal)) { $restoreFailed = $true }
         if ($manifestsMoved -and (Test-Path -LiteralPath $depotCacheDir -PathType Container)) {
             # Every matching manifest was moved out before extraction began, so any
             # matching one present now came from the new ZIP.
@@ -1946,7 +2130,9 @@ function Invoke-SteamDowngrade {
         Write-Host "`nModifying $AppManifestFile to bypass disk space check..." -ForegroundColor Yellow
         try {
             Set-ItemProperty -Path $acfPath -Name IsReadOnly -Value $false
-            $content = Get-Content -Path $acfPath -Raw
+            # Steam writes appmanifests as UTF-8 without a BOM; read and write them the
+            # same way so a non-ASCII game or folder name survives the edit.
+            $content = [IO.File]::ReadAllText($acfPath, [Text.UTF8Encoding]::new($false))
             if ($content -match '"StateFlags"') {
                 $content = $content -replace '"StateFlags"\s*"\d+"', '"StateFlags"		"4"'
                 $content = $content -replace '"BytesToDownload"\s*"\d+"', '"BytesToDownload"		"0"'
@@ -1954,7 +2140,7 @@ function Invoke-SteamDowngrade {
                 $content = $content -replace '"UpdateResult"\s*"\d+"', '"UpdateResult"		"0"'
                 $content = $content -replace '"SizeOnDisk"\s*"\d+"', '"SizeOnDisk"		"0"'
                 $content = $content -replace '"buildid"\s*"\d+"', '"buildid"		"1"'
-                $content | Set-Content -Path $acfPath -NoNewline
+                [IO.File]::WriteAllText($acfPath, $content, [Text.UTF8Encoding]::new($false))
                 $acfFixed = $true
                 Write-Host "AppManifest modified successfully. Steam will treat the game as already installed." -ForegroundColor Green
             } else { Write-Warning "The AppManifest file is severely corrupted (missing StateFlags)." }
@@ -4511,6 +4697,10 @@ function Start-WorkerWatcher {
 function Invoke-DowngradeWithElevation {
     param([ValidateSet('Normal', 'Nuclear')][string]$Method)
 
+    # Read-only check first: a downgrade that cannot run must stop here, before the
+    # Nuclear question, the UAC prompt, and above all before the fix is reverted.
+    $null = Test-SteamDowngradeReadiness -Method $Method
+
     # Nuclear deletes files from the Steam folder, so it always asks first and
     # states exactly what goes. The confirmation sits here, before elevation, so
     # it is shown once whether the app is already elevated or has to relaunch.
@@ -4748,6 +4938,9 @@ if ($RunDowngradeOnly) {
             # Logged inside the action: Run-Action clears the log before it starts.
             Add-LogEntry -Text ('=== ' + $chosen + ' downgrade started in the administrator window ===') -Color '#C586C0'
             Add-LogEntry -Text '    This can take several minutes; the log below updates live.' -Color '#606070'
+            # Checked again here: this window may run as another account, and nothing
+            # may be reverted for a downgrade that cannot run.
+            $null = Test-SteamDowngradeReadiness -Method $chosen
             # Revert an applied fix first: its files and backups belong to the version
             # that is about to be replaced.
             Clear-FixBeforeDowngrade -Method $chosen
