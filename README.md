@@ -32,7 +32,7 @@ No installation, no leftovers: the script is the program.
 | Page | Actions |
 | --- | --- |
 | **Overview** | Shows the detected game folder, installs the fix, opens languages, and a green **Play** card that launches `!start_sp26.bat` |
-| **Fix Installer** | Installs or restores the fix, removes it again from the oldest backup, then deletes `og files` |
+| **Fix Installer** | Installs or restores the fix, removes it again by putting back exactly the originals its backups recorded, then deletes `og files` |
 | **Languages** | Installs a language pack, switches the active preset, removes a pack |
 | **Downgrade Version** | Normal or Nuclear downgrade for "Invalid game version" |
 
@@ -54,22 +54,28 @@ elevated, Steam libraries, the folder in use) so a bug report is one file.
 
 | Location | Why |
 | --- | --- |
-| Your game folder | Replaced files are backed up to a timestamped `og files` folder first; removing the fix restores from the oldest one and then deletes `og files` |
+| Your game folder | Replaced files are backed up to a timestamped `og files` folder first, together with a small record (`.codhq-fix-backup.json`) of which files were replaced and which the fix added. Removing the fix puts back exactly those originals and deletes exactly those added files, then deletes `og files` |
 | `%TEMP%` | Downloads are staged there and cleaned up afterwards |
 | `<Steam>\config\stplug-in\1938090.lua` | The downgrade replaces this Lua file with a version-locked copy. The old one is moved to a temporary backup and only deleted once the new Lua file and manifests are in place; if a download fails, it is put back |
-| `<Steam>\depotcache` | The downgrade replaces **this game's** manifests with the version-locked ones. The old ones are kept in the same temporary backup and restored if a download fails |
+| `<Steam>\depotcache` | The downgrade replaces **this game's** manifests with the version-locked ones. The old ones are kept in the same temporary backup and restored if a download fails. Any Steam file the manifest archive would overwrite is kept in that backup too, and put back if the extraction fails |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\settings.json` | Your saved folder, theme, accent and window state |
-| `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\worker.json`, `last-run.json` | Hand-off between the normal window and the administrator window during a downgrade; the first is removed when the run hands back, the second is how the normal window reports the result |
-| `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\logs` | The log of an administrator downgrade run, saved automatically before that window closes |
+| `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\worker.json`, `last-run.json` | Hand-off between the normal window and the administrator window during a downgrade; the first is removed when the run hands back, the second is how the normal window reports the result. Always written to the folder of the account that started the utility, even when the administrator is a different account |
+| `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\logs` | The log of an administrator downgrade run, saved automatically before that window closes (same folder rule as above) |
 
 Nothing else is written outside those paths. `og files` is deleted only after its
 originals have been put back: by **Remove fix** once every file is restored, and at
-the start of a downgrade (see below). If any file fails to restore, nothing is
-deleted. Downloaded copies of the utility in `%TEMP%` (`codhq-setup-*.ps1`) are
-deleted when the window closes; any left by a crash are removed a day later.
+the start of a downgrade (see below). Every original is checked before anything is
+changed, and if any file fails to restore, nothing is deleted. An install that fails
+half way rolls its files back and removes its own partial backup, so a broken backup
+can never be mistaken for the real originals later. Backups have no size limit.
+Downloaded copies of the utility in `%TEMP%` (`codhq-setup-*.ps1`) are deleted when
+the window closes; any left by a crash are removed a day later.
 
 **Network access:** GitHub releases (fix archive and downgrade manifests) and
 `ps.lua.tools` (only during the Nuclear downgrade, to install BetterSteamTools).
+Removing the fix needs no network, except for backups made by versions from before
+the backup record existed: for those the fix archive is downloaded once to learn which
+files it installed.
 
 ## The Nuclear downgrade
 
@@ -77,13 +83,23 @@ Nuclear is destructive and asks for confirmation first. It closes Steam and dele
 everything in the Steam folder **except** `appcache`, `config`, `steam`, `steamapps`,
 `userdata` and `steam.exe`. It then starts Steam so it can rebuild what was removed,
 closes it, installs BetterSteamTools, and finally runs the same steps as the Normal
-downgrade.
+downgrade. The BetterSteamTools installer runs in its own PowerShell process, with its
+output shown line by line in the activity log; if it fails or takes longer than 10
+minutes, that is logged as a warning and the downgrade carries on. Its configuration
+reads Lua files from `config\stplug-in`, so Nuclear creates that folder when it is
+missing.
 
-**Both downgrades begin by undoing an applied fix.** If `og files` is present, you are
-asked to confirm, the originals are restored from the oldest backup, and then the
-whole `og files` folder is deleted. The downgrade changes which game version is
-installed, so files and backups made for the old one no longer belong there. Declining
-cancels the downgrade rather than leaving two versions mixed together.
+**Both downgrades first check that they can run.** Steam must be found with its
+`steam.exe`, and the Normal downgrade also needs `config\stplug-in` (SteamTools or
+BetterSteamTools). This is checked before the UAC prompt and again in the
+administrator window; if anything is missing, the downgrade stops there and nothing
+is changed.
+
+**Both downgrades then undo an applied fix.** If `og files` is present, you are asked
+to confirm, the originals recorded in its backups are put back, and then the whole
+`og files` folder is deleted. The downgrade changes which game version is installed,
+so files and backups made for the old one no longer belong there. Declining cancels
+the downgrade rather than leaving two versions mixed together.
 
 ![Nuclear confirmation](docs/nuclear-confirm.png)
 
@@ -105,7 +121,9 @@ window you started from comes back with the same result.
 While that window works, the window you started the utility from minimizes and stays
 out of the way — you should only ever see one window at a time. It returns by itself
 once the administrator window is closed, with the outcome and the log path already in
-its activity log, so you can carry on without relaunching.
+its activity log, so you can carry on without relaunching. This also works when the
+UAC prompt asks for a different administrator account: the window you started passes
+its own settings folder and the game folder it uses to the administrator window.
 
 ## Troubleshooting
 
@@ -150,9 +168,11 @@ applies to every script you find online, including this one.
 ## Tests
 
 `tests\` holds Pester 5 tests for the parts that work on files: settings, the fix
-install and removal, language packs, the `configs.user.ini` edits, ZIP path checks
-and the downgrade's Lua/manifest backup and restore. Downloads, Steam, services,
-processes and prompts are mocked, so running them touches nothing on your PC.
+install and removal (including backup records, failed installs and backups from older
+versions), language packs, the `configs.user.ini` edits, ZIP path checks, the
+downgrade's checks before it starts, its Lua/manifest backup and restore, the
+out-of-process script runner and the administrator hand-off folder. Downloads, Steam,
+services, processes and prompts are mocked, so running them touches nothing on your PC.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck

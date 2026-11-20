@@ -313,14 +313,152 @@ Describe 'Fix install and removal' {
         Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
     }
 
-    It 'keeps "og files" when the removal fails' {
+    It 'keeps "og files" and changes nothing when an original is missing from its backup' {
+        Set-Answers 'y'
+        Install-Fix
+        $backup = @(Get-ChildItem -LiteralPath (Join-Path $game 'og files') -Directory)[0]
+        Remove-Item -LiteralPath (Join-Path $backup.FullName 'a.txt') -Force
+        Set-Answers 'y'
+        { Remove-Fix } | Should -Throw '*missing from its backup*'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+        Get-Text (Join-Path $game 'sub\b.txt') | Should -Be 'added'
+    }
+
+    It 'writes a backup record listing the replaced and the added files' {
+        Set-Answers 'y'
+        Install-Fix
+        $backup = @(Get-ChildItem -LiteralPath (Join-Path $game 'og files') -Directory)[0]
+        $record = Read-FixBackupRecord -Path (Join-Path $backup.FullName (Get-FixBackupRecordName))
+        $record.Complete | Should -BeTrue
+        @($record.ReplacedFiles) | Should -Be @('a.txt')
+        @($record.AddedFiles) | Should -Be @('sub\b.txt')
+    }
+
+    It 'removes a recorded fix without downloading anything' {
         Set-Answers 'y'
         Install-Fix
         Mock Download-FileWithProgress { throw 'network down' }
         Set-Answers 'y'
-        { Remove-Fix } | Should -Throw '*network down*'
+        Remove-Fix
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Test-Path -LiteralPath (Join-Path $game 'sub\b.txt') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+    }
+
+    It 'refuses a ZIP that contains the backup record name' {
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed'; '.codhq-fix-backup.json' = '{}' })
+        Set-Answers 'y'
+        { Install-Fix } | Should -Throw '*reserves*'
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+    }
+
+    It 'leaves no partial backup when an install fails, so a later removal restores every original' {
+        Set-Content -LiteralPath (Join-Path $game 'c.txt') -Value 'original c'
+        $null = New-Item -ItemType Directory -Path (Join-Path $game 'd') -Force
+        Remove-Item -LiteralPath $fixZip -Force
+        # 'd' is a folder in the game, so the install fails after a.txt and c.txt.
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed'; 'c.txt' = 'fixed c'; 'd' = 'blocked' })
+        Set-Answers 'y'
+        { Install-Fix } | Should -Throw '*conflicts with an existing directory*'
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Get-Text (Join-Path $game 'c.txt') | Should -Be 'original c'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed'; 'c.txt' = 'fixed c' })
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'y'
+        Remove-Fix
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Get-Text (Join-Path $game 'c.txt') | Should -Be 'original c'
+    }
+
+    It 'removes a fix that only added files' {
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'new.txt' = 'added only' })
+        Set-Answers 'y'
+        Install-Fix
         Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
-        Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+        Set-Answers 'y'
+        Remove-Fix
+        Test-Path -LiteralPath (Join-Path $game 'new.txt') | Should -BeFalse
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+    }
+
+    It 'uses a recorded backup larger than 20 MB' {
+        $big = Join-Path $game 'big.bin'
+        [IO.File]::WriteAllBytes($big, [byte[]]::new(21MB))
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'big.bin' = 'small fixed' })
+        Set-Answers 'y'
+        Install-Fix
+        (Get-Item -LiteralPath $big).Length | Should -BeLessThan 1KB
+        Set-Answers 'y'
+        Remove-Fix
+        (Get-Item -LiteralPath $big).Length | Should -Be 21MB
+    }
+
+    It 'restores each file from the backup that holds its original when a newer ZIP adds files' {
+        Set-Content -LiteralPath (Join-Path $game 'e.txt') -Value 'original e'
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed' })
+        Set-Answers 'y'
+        Install-Fix
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'a.txt' = 'fixed'; 'e.txt' = 'fixed e' })
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'y'
+        Remove-Fix
+        Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+        Get-Text (Join-Path $game 'e.txt') | Should -Be 'original e'
+    }
+
+    Context 'backups made before backup records existed' {
+        BeforeEach {
+            # What an older version left: originals only, no record.
+            $legacy = Join-Path $game 'og files\20240101-000000-abcdef'
+            $null = New-Item -ItemType Directory -Path $legacy -Force
+            Set-Content -LiteralPath (Join-Path $legacy 'a.txt') -Value 'original'
+            Set-Content -LiteralPath (Join-Path $game 'a.txt') -Value 'fixed'
+            $null = New-Item -ItemType Directory -Path (Join-Path $game 'sub') -Force
+            Set-Content -LiteralPath (Join-Path $game 'sub\b.txt') -Value 'added'
+        }
+
+        It 'still removes the fix the old way' {
+            Set-Answers 'y'
+            Remove-Fix
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'original'
+            Test-Path -LiteralPath (Join-Path $game 'sub\b.txt') | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+        }
+
+        It 'keeps "og files" when the download fails' {
+            Mock Download-FileWithProgress { throw 'network down' }
+            Set-Answers 'y'
+            { Remove-Fix } | Should -Throw '*network down*'
+            Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+        }
+
+        It 'refuses a backup holding files that are not part of the fix' {
+            Set-Content -LiteralPath (Join-Path $legacy 'other.txt') -Value 'not from the fix'
+            Set-Answers 'y'
+            { Remove-Fix } | Should -Throw '*not part of the fix*'
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+            Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+        }
+
+        It 'is not limited to 20 MB any more' {
+            [IO.File]::WriteAllBytes((Join-Path $legacy 'a.txt'), [byte[]]::new(21MB))
+            Set-Answers 'y'
+            Remove-Fix
+            (Get-Item -LiteralPath (Join-Path $game 'a.txt')).Length | Should -Be 21MB
+        }
     }
 
     It 'never deletes "og files" when it is a file instead of a folder' {
@@ -379,6 +517,49 @@ Describe 'Reverting the fix before a downgrade' {
     It 'does nothing when there is no "og files"' {
         Clear-FixBeforeDowngrade -Method Normal
         Should -Invoke Read-Host -Times 0
+    }
+
+    It 'restores a recorded backup larger than 20 MB instead of only deleting it' {
+        $big = Join-Path $game 'big.bin'
+        [IO.File]::WriteAllBytes($big, [byte[]]::new(21MB))
+        Remove-Item -LiteralPath $fixZip -Force
+        New-TestZip -Path $fixZip -Entries ([ordered]@{ 'big.bin' = 'small fixed' })
+        Set-Answers 'y'
+        Install-Fix
+        Set-Answers 'y'
+        Clear-FixBeforeDowngrade -Method Normal
+        (Get-Item -LiteralPath $big).Length | Should -Be 21MB
+        Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeFalse
+    }
+
+    Context 'a downgrade that cannot run' {
+        BeforeEach {
+            $steam = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('steam-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+            Set-Content -LiteralPath (Join-Path $steam 'steam.exe') -Value 'fake'
+            Mock Get-SteamInstallationPath { $steam }
+            Mock Test-IsElevated { $true }
+            Mock Invoke-SteamDowngrade { throw 'the downgrade must not start' }
+            Set-Answers 'y'
+            Install-Fix
+        }
+
+        It 'stops before the fix is touched when Steam is missing' {
+            Mock Get-SteamInstallationPath { $null }
+            { Invoke-DowngradeWithElevation -Method Normal } | Should -Throw '*Steam installation not found*'
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+            Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+        }
+
+        It 'stops before the fix is touched when Normal has no stplug-in folder' {
+            { Invoke-DowngradeWithElevation -Method Normal } | Should -Throw '*stplug-in*'
+            Get-Text (Join-Path $game 'a.txt') | Should -Be 'fixed'
+            Test-Path -LiteralPath (Join-Path $game 'og files') | Should -BeTrue
+        }
+
+        It 'lets Nuclear through without stplug-in, because it creates the folder' {
+            Test-SteamDowngradeReadiness -Method Nuclear | Should -Be $steam
+            { Test-SteamDowngradeReadiness -Method Normal } | Should -Throw '*stplug-in*'
+        }
     }
 }
 
@@ -541,5 +722,115 @@ Describe 'Steam downgrade: Lua file and manifests' {
         Test-Path -LiteralPath (Join-Path $depot "$($codDepotIds[0])_222.manifest") | Should -BeFalse
         Get-Text (Join-Path $depot '999_1.manifest') | Should -Be 'other game'
         (& $leftoverBackups).Count | Should -Be $before.Count
+    }
+
+    It 'refuses a manifest ZIP that would write outside the Steam folder' {
+        Remove-Item -LiteralPath $manifestZip -Force
+        New-TestZip -Path $manifestZip -Entries ([ordered]@{ "depotcache/$($codDepotIds[0])_222.manifest" = 'new manifest'; '../evil.txt' = 'evil' })
+        { Invoke-SteamDowngrade -Method Normal } | Should -Throw '*unsafe path*'
+        Test-Path -LiteralPath (Join-Path (Split-Path $steam -Parent) 'evil.txt') | Should -BeFalse
+        Get-Text (Join-Path $plugIn '1938090.lua') | Should -Be 'old lua'
+        Get-Text (Join-Path $depot "$($codDepotIds[0])_111.manifest") | Should -Be 'old manifest'
+        Test-Path -LiteralPath (Join-Path $depot "$($codDepotIds[0])_222.manifest") | Should -BeFalse
+    }
+
+    It 'puts back a Steam file the manifest ZIP overwrote when extraction fails half way' {
+        $other = Join-Path $steam 'config\other.cfg'
+        Set-Content -LiteralPath $other -Value 'original cfg'
+        $locked = Join-Path $steam 'locked.bin'
+        Set-Content -LiteralPath $locked -Value 'in use'
+        Remove-Item -LiteralPath $manifestZip -Force
+        New-TestZip -Path $manifestZip -Entries ([ordered]@{
+            "depotcache/$($codDepotIds[0])_222.manifest" = 'new manifest'
+            'config/other.cfg' = 'zip cfg'
+            'locked.bin' = 'zip copy'
+        })
+        # An open file cannot be moved aside, so the third entry fails.
+        $handle = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try {
+            { Invoke-SteamDowngrade -Method Normal } | Should -Throw
+        } finally { $handle.Dispose() }
+        Get-Text $other | Should -Be 'original cfg'
+        Get-Text $locked | Should -Be 'in use'
+        Get-Text (Join-Path $plugIn '1938090.lua') | Should -Be 'old lua'
+        Get-Text (Join-Path $depot "$($codDepotIds[0])_111.manifest") | Should -Be 'old manifest'
+        Test-Path -LiteralPath (Join-Path $depot "$($codDepotIds[0])_222.manifest") | Should -BeFalse
+        (& $leftoverBackups).Count | Should -Be $before.Count
+    }
+
+    It 'keeps non-ASCII text in the appmanifest intact' {
+        $acf = Join-Path $steam 'steamapps\appmanifest_1938090.acf'
+        $null = New-Item -ItemType Directory -Path (Split-Path $acf -Parent) -Force
+        $name = 'Caf' + [char]0x00E9 + ' HQ'
+        $content = "`"AppState`"`n{`n`t`"name`"`t`t`"$name`"`n`t`"StateFlags`"`t`t`"6`"`n`t`"buildid`"`t`t`"123`"`n}`n"
+        [IO.File]::WriteAllText($acf, $content, [Text.UTF8Encoding]::new($false))
+        Invoke-SteamDowngrade -Method Normal
+        $after = [IO.File]::ReadAllText($acf, [Text.UTF8Encoding]::new($false))
+        $after | Should -Match ([regex]::Escape($name))
+        $after | Should -Match '"StateFlags"\s+"4"'
+        $after | Should -Match '"buildid"\s+"1"'
+        [IO.File]::ReadAllBytes($acf)[0] | Should -Not -Be 0xEF
+    }
+
+    It 'Nuclear creates config\stplug-in when it is missing and runs BetterSteamTools out of process' {
+        Remove-Item -LiteralPath $plugIn -Recurse -Force
+        Mock Invoke-RestMethod { 'Write-Host "fake installer"' }
+        Mock Invoke-ExternalPowerShellScript { [pscustomobject]@{ ExitCode = 1; TimedOut = $false; Output = @('fake installer'); Errors = @() } }
+        Invoke-SteamDowngrade -Method Nuclear
+        Test-Path -LiteralPath $plugIn -PathType Container | Should -BeTrue
+        Get-Text (Join-Path $plugIn '1938090.lua') | Should -Be 'new lua'
+        Should -Invoke Invoke-ExternalPowerShellScript -Times 1
+        Should -Invoke Write-Warning -ParameterFilter { $Message -like '*exit code 1*' }
+    }
+}
+
+Describe 'Running a downloaded script in its own process' {
+    BeforeEach { $work = Join-Path $TestDrive ('run-' + [guid]::NewGuid().ToString('N')) }
+
+    It 'returns its exit code and output, and its exit and variables stay in that process' {
+        $global:CodhqChildMarker = 'untouched'
+        $script = 'Write-Host "hello from the child"; $global:CodhqChildMarker = "changed"; Write-Error "something bad" -ErrorAction Continue; exit 3'
+        $run = Invoke-ExternalPowerShellScript -ScriptText $script -WorkRoot $work -Name 'child'
+        $run.ExitCode | Should -Be 3
+        $run.TimedOut | Should -BeFalse
+        $run.Output -join "`n" | Should -Match 'hello from the child'
+        $run.Errors -join "`n" | Should -Match 'something bad'
+        $global:CodhqChildMarker | Should -Be 'untouched'
+        Remove-Variable -Name CodhqChildMarker -Scope Global -ErrorAction SilentlyContinue
+    }
+
+    It 'stops a script that runs past its time limit' {
+        $run = Invoke-ExternalPowerShellScript -ScriptText 'Start-Sleep -Seconds 60' -WorkRoot $work -Name 'slow' -TimeoutSeconds 3
+        $run.TimedOut | Should -BeTrue
+    }
+}
+
+Describe 'Administrator hand-off folder' {
+    BeforeEach {
+        $SettingsDirectory = Join-Path $TestDrive ('settings-' + [guid]::NewGuid().ToString('N'))
+        $handoff = Join-Path $TestDrive ('handoff-' + [guid]::NewGuid().ToString('N'))
+        $global:HandoffDirectory = ''
+    }
+    AfterEach { $global:HandoffDirectory = '' }
+
+    It 'uses this account''s settings folder when no hand-off folder is given' {
+        Get-HandoffDirectory | Should -Be $SettingsDirectory
+        Write-WorkerHandshake -Method Normal
+        Test-Path -LiteralPath (Join-Path $SettingsDirectory 'worker.json') | Should -BeTrue
+    }
+
+    It 'writes the worker files into -HandoffDirectory when it is given' {
+        $global:HandoffDirectory = $handoff
+        Write-WorkerHandshake -Method Nuclear
+        Write-LastWorkerResult -Method Nuclear -State Ready -LogPath ''
+        Test-Path -LiteralPath (Join-Path $handoff 'worker.json') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $handoff 'last-run.json') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $SettingsDirectory 'worker.json') | Should -BeFalse
+        Get-WorkerHandshakePid -Since (Get-Date).AddMinutes(-1) | Should -Be $PID
+    }
+
+    It 'quotes paths so a trailing backslash cannot escape the quote' {
+        ConvertTo-QuotedArgument 'C:\Users\Some One' | Should -BeExactly '"C:\Users\Some One"'
+        ConvertTo-QuotedArgument 'D:\' | Should -BeExactly '"D:\\"'
     }
 }

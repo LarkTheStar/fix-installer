@@ -53,14 +53,22 @@ public static class CodhqGuiTestMouse {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); }
 }
 '@
 }
 function Click-Element {
     param($Window, $Element)
-    [void][CodhqGuiTestMouse]::SetForegroundWindow([IntPtr]$Window.Current.NativeWindowHandle)
-    Start-Sleep -Milliseconds 150
+    # Windows does not always let a background process bring a window to the front,
+    # and a click that lands while the window is still behind only activates it. So
+    # wait until it really is the foreground window before clicking.
+    $handle = [IntPtr]$Window.Current.NativeWindowHandle
+    $deadline = [DateTime]::UtcNow.AddSeconds(3)
+    do {
+        [void][CodhqGuiTestMouse]::SetForegroundWindow($handle)
+        Start-Sleep -Milliseconds 150
+    } while ([CodhqGuiTestMouse]::GetForegroundWindow() -ne $handle -and [DateTime]::UtcNow -lt $deadline)
     $rect = $Element.Current.BoundingRectangle
     [CodhqGuiTestMouse]::Click([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2))
 }
@@ -116,7 +124,13 @@ try {
         if ($null -eq $button) { continue }
         Click-Element $window $button
         $expected = $pages[$nav]
-        Check "$nav opens its page" (Wait-Until -Seconds 5 { (Get-Text $window 'HeaderTitle') -like "*$expected*" })
+        $opened = Wait-Until -Seconds 5 { (Get-Text $window 'HeaderTitle') -like "*$expected*" }
+        if (-not $opened) {
+            # One retry: a click that only brought the window forward did not reach the button.
+            Click-Element $window $button
+            $opened = Wait-Until -Seconds 5 { (Get-Text $window 'HeaderTitle') -like "*$expected*" }
+        }
+        Check "$nav opens its page" $opened
     }
 
     $themeBefore = (Find-ById $window 'ThemeToggleIcon').Current.Name
