@@ -3412,6 +3412,193 @@ function Start-CatalogGame {
 }
 
 # ==========================================
+# GAMES: EXECUTABLE CHECK (BO3 / BO4)
+# ==========================================
+# Checks the player's own executable against the build the client expects (the size
+# and SHA-1 CB publishes for it). The executable itself is never downloaded.
+function Test-GameExecutable {
+    param([Parameter(Mandatory)][string]$GameId, [string]$GameFolder = '', $Manifest = $null)
+    $game = Get-CatalogGame -Id $GameId
+    if ($null -eq $game.ExeCheck) { throw "$($game.Name) has no executable check." }
+    if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
+    if (-not $GameFolder) { throw "$($game.Name) was not found. Pick its folder with Change folder." }
+    $file = Join-Path $GameFolder $game.ExeCheck.File
+    $result = [pscustomobject]@{ File = $file; Exists = $false; Version = ''; Product = ''; Size = 0; Sha1 = ''; Sha256 = ''
+        ExpectedSize = 0; ExpectedSha1 = ''; Matches = $false; MissingFiles = @(); Repair = $game.ExeCheck.Repair }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Write-Warn "$($game.ExeCheck.File) was not found in $GameFolder."
+        Write-Info $game.ExeCheck.Repair
+        return $result
+    }
+    $item = Get-Item -LiteralPath $file -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$file is a link, not the game's own file." }
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($file)
+    $result.Exists = $true
+    $result.Version = [string]$versionInfo.FileVersion
+    $result.Product = [string]$versionInfo.ProductName
+    $result.Size = $item.Length
+    $result.Sha1 = Get-FileSha1Hex $file
+    $result.Sha256 = Get-FileSha256 -Path $file
+    $result.MissingFiles = @($game.ValidFiles | Where-Object { $_ -ne $game.ExeCheck.File -and -not (Test-Path -LiteralPath (Join-Path $GameFolder $_)) })
+    Write-Info ("{0}: version {1}, {2:N0} bytes" -f $game.ExeCheck.File, $(if ($result.Version) { $result.Version } else { 'unknown' }), $result.Size)
+    Write-Info "  SHA-1   $($result.Sha1)"
+    Write-Info "  SHA-256 $($result.Sha256)"
+    try {
+        if ($null -eq $Manifest) { $Manifest = Get-ClientManifest -Manifest $game.ExeCheck.Manifest }
+        $expected = $Manifest.Entries | Where-Object { ($_.Path -split '/')[-1] -ieq $game.ExeCheck.File } | Select-Object -First 1
+        if ($expected) {
+            $result.ExpectedSize = $expected.Size; $result.ExpectedSha1 = $expected.Sha1
+            $result.Matches = ($expected.Size -eq $result.Size -and $expected.Sha1 -eq $result.Sha1)
+            if ($result.Matches) { Write-Ok "This is the build the client expects." }
+            else {
+                Write-Warn ("This is a different build than the client expects ({0:N0} bytes, SHA-1 {1})." -f $expected.Size, $expected.Sha1)
+                Write-Info $game.ExeCheck.Repair
+            }
+        } else { Write-Warn 'The client''s manifest does not name an expected build; only your file was checked.' }
+    } catch { Write-Warn "Could not read the expected build ($($_.Exception.Message)); only your file was checked." }
+    foreach ($missingFile in $result.MissingFiles) { Write-Info "Not present (may be normal for your edition): $missingFile" }
+    return $result
+}
+
+# ==========================================
+# GAMES: CD KEYS (the player's own)
+# ==========================================
+# The registry locations the CB launcher uses (docs/cb-launcher/executables-and-keys.md).
+# Values are 20 uppercase letters and digits without dashes. Only a key the player
+# types is written; this file contains none. Keys never reach the log.
+function Get-CdKeySpec {
+    param([Parameter(Mandatory)][string]$GameId)
+    switch ($GameId) {
+        'cod2' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty 2'; ValueNames = @('codkey'); Hklm = 'SOFTWARE\Activision\Call of Duty 2' } }
+        'coduo' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty United Offensive'; ValueNames = @('key', 'codkey'); Hklm = 'SOFTWARE\Activision\Call of Duty United Offensive' } }
+        'cod4' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Activision\Call of Duty 4'; ValueNames = @('codkey'); Hklm = '' } }
+        default { throw "$GameId has no CD key." }
+    }
+}
+
+# Where CD keys are written: the real HKCU, or a private key in sandbox mode and tests.
+function Get-CdKeyRegistryRoot {
+    if (-not [string]::IsNullOrWhiteSpace([string]$global:CdKeyRegistryRootOverride)) { return [string]$global:CdKeyRegistryRootOverride }
+    if (Test-SandboxMode) { return 'HKCU:\SOFTWARE\codhq-sandbox\' }
+    return 'HKCU:\'
+}
+
+function ConvertTo-CdKey {
+    param([string]$Key)
+    $normal = ([string]$Key -replace '[\s-]', '').ToUpperInvariant()
+    if ($normal -notmatch '^[A-Z0-9]{20}$') { throw 'A CD key is 20 letters and digits (dashes and spaces are ignored). Copy it from Steam: right-click the game > Manage > CD Keys.' }
+    return $normal
+}
+
+function Format-MaskedCdKey {
+    param([string]$Key)
+    if ([string]::IsNullOrEmpty($Key)) { return '(none)' }
+    $tail = if ($Key.Length -ge 4) { $Key.Substring($Key.Length - 4) } else { $Key }
+    return ('****-****-****-****-' + $tail)
+}
+
+# The retail installer's key in HKLM (32-bit view), which must never be shadowed.
+function Get-RetailCdKeyPresent {
+    param([Parameter(Mandatory)]$Spec)
+    if (-not $Spec.Hklm -or (Get-CdKeyRegistryRoot) -ne 'HKCU:\') { return $false }
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        $key = $base.OpenSubKey($Spec.Hklm)
+        if ($null -eq $key) { return $false }
+        try { foreach ($name in $Spec.ValueNames) { if (-not [string]::IsNullOrEmpty([string]$key.GetValue($name))) { return $true } } } finally { $key.Dispose() }
+    } catch { Write-Verbose 'HKLM not readable.' }
+    return $false
+}
+
+function Get-GameCdKeyStatus {
+    param([Parameter(Mandatory)][string]$GameId)
+    $spec = Get-CdKeySpec -GameId $GameId
+    $path = (Get-CdKeyRegistryRoot) + $spec.Subkey
+    $values = foreach ($name in $spec.ValueNames) {
+        $value = [string](Get-ItemProperty -LiteralPath $path -Name $name -ErrorAction SilentlyContinue).$name
+        [pscustomobject]@{ Name = $name; Present = -not [string]::IsNullOrEmpty($value); Masked = (Format-MaskedCdKey $value) }
+    }
+    [pscustomobject]@{ GameId = $GameId; RegistryPath = $path; Values = @($values); RetailKeyInHklm = (Get-RetailCdKeyPresent -Spec $spec) }
+}
+
+function Get-CdKeyBackupFolder { Join-Path $SettingsDirectory 'cdkey-backups' }
+
+# Runs reg.exe with its output captured. reg.exe reports success on stderr, which
+# Windows PowerShell would otherwise turn into an error; the exit code decides.
+function Invoke-RegExe {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $startInfo.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
+    $startInfo.UseShellExecute = $false; $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true; $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd(); $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = ($stdout + $stderr).Trim() }
+    } finally { $process.Dispose() }
+}
+
+# Exports the current key to a .reg file. When there is no key yet, the backup says
+# so, and restoring it removes the values again.
+function Backup-GameCdKey {
+    param([Parameter(Mandatory)][string]$GameId)
+    $spec = Get-CdKeySpec -GameId $GameId
+    $root = Get-CdKeyRegistryRoot
+    $folder = Get-CdKeyBackupFolder
+    if (-not (Test-Path -LiteralPath $folder)) { $null = New-Item -ItemType Directory -Path $folder -Force }
+    $file = Join-Path $folder ('{0}-{1}.reg' -f $GameId, (Get-Date).ToString('yyyyMMdd-HHmmss-fff'))
+    if (Test-Path -LiteralPath ($root + $spec.Subkey)) {
+        $regPath = (($root -replace '^HKCU:\\', 'HKCU\') + $spec.Subkey)
+        $reg = Invoke-RegExe -Arguments @('export', $regPath, $file, '/y')
+        if ($reg.ExitCode -ne 0) { throw "Backing up the CD key failed: $($reg.Output)" }
+    } else {
+        [IO.File]::WriteAllText($file, "Windows Registry Editor Version 5.00`r`n`r`n; codhq: no key existed`r`n", [Text.Encoding]::Unicode)
+    }
+    Write-Ok "CD key backed up to $file"
+    return $file
+}
+
+function Get-GameCdKeyBackups {
+    param([Parameter(Mandatory)][string]$GameId)
+    $folder = Get-CdKeyBackupFolder
+    if (-not (Test-Path -LiteralPath $folder)) { return @() }
+    return @(Get-ChildItem -LiteralPath $folder -Filter "$GameId-*.reg" -File | Sort-Object Name -Descending)
+}
+
+function Set-GameCdKey {
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$Key)
+    $spec = Get-CdKeySpec -GameId $GameId
+    $normal = ConvertTo-CdKey $Key
+    if (Get-RetailCdKeyPresent -Spec $spec) { throw 'This game already has a key from its own installer (in HKLM). It is used as it is; nothing was changed.' }
+    $null = Backup-GameCdKey -GameId $GameId
+    $path = (Get-CdKeyRegistryRoot) + $spec.Subkey
+    if (-not (Test-Path -LiteralPath $path)) { $null = New-Item -Path $path -Force }
+    foreach ($name in $spec.ValueNames) { New-ItemProperty -LiteralPath $path -Name $name -Value $normal -PropertyType String -Force | Out-Null }
+    foreach ($name in $spec.ValueNames) {
+        if ([string](Get-ItemProperty -LiteralPath $path -Name $name).$name -ne $normal) { throw "The CD key could not be confirmed after writing ($name)." }
+    }
+    Write-Ok ("CD key saved: {0}" -f (Format-MaskedCdKey $normal))
+}
+
+function Restore-GameCdKey {
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$BackupFile)
+    $spec = Get-CdKeySpec -GameId $GameId
+    if (-not (Test-Path -LiteralPath $BackupFile -PathType Leaf)) { throw "Backup not found: $BackupFile" }
+    $path = (Get-CdKeyRegistryRoot) + $spec.Subkey
+    $text = [IO.File]::ReadAllText($BackupFile)
+    if ($text -match '; codhq: no key existed') {
+        foreach ($name in $spec.ValueNames) { Remove-ItemProperty -LiteralPath $path -Name $name -ErrorAction SilentlyContinue }
+    } else {
+        $reg = Invoke-RegExe -Arguments @('import', $BackupFile)
+        if ($reg.ExitCode -ne 0) { throw "Restoring the CD key failed: $($reg.Output)" }
+    }
+    $status = Get-GameCdKeyStatus -GameId $GameId
+    Write-Ok ("CD key restored: {0}" -f (($status.Values | ForEach-Object { "$($_.Name) $($_.Masked)" }) -join ', '))
+}
+
+# ==========================================
 # WPF GUI DEFINITION (Ultimate Cool Design)
 # ==========================================
 [xml]$xaml = @"

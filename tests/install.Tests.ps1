@@ -1531,6 +1531,86 @@ Describe 'Plutonium and launching games' {
     }
 }
 
+Describe 'CD keys (the player''s own)' -Skip:([bool]$IsLinux -or [bool]$IsMacOS) {
+    BeforeEach {
+        $testRoot = 'HKCU:\Software\codhq-tests\' + [guid]::NewGuid().ToString('N') + '\'
+        $global:CdKeyRegistryRootOverride = $testRoot
+        $SettingsDirectory = Join-Path $TestDrive ('settings-' + [guid]::NewGuid().ToString('N'))
+        $script:logged = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { $script:logged.Add([string]$Object) }
+        $key = 'ABCD-EFGH-JKLM-NPQR-ST12'
+    }
+    AfterEach {
+        $global:CdKeyRegistryRootOverride = ''
+        Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+        if ((Test-Path 'HKCU:\Software\codhq-tests') -and -not (Get-ChildItem 'HKCU:\Software\codhq-tests')) { Remove-Item 'HKCU:\Software\codhq-tests' -Force }
+    }
+
+    It 'accepts a key as Steam shows it and refuses anything else' {
+        ConvertTo-CdKey 'abcd-efgh-jklm-npqr-st12' | Should -BeExactly 'ABCDEFGHJKLMNPQRST12'
+        { ConvertTo-CdKey 'TOO-SHORT' } | Should -Throw '*20 letters and digits*'
+        { ConvertTo-CdKey 'ABCD-EFGH-JKLM-NPQR-ST1!' } | Should -Throw
+    }
+
+    It 'writes every value the game reads, reads it back and only ever shows it masked' {
+        Set-GameCdKey -GameId 'coduo' -Key $key
+        $status = Get-GameCdKeyStatus -GameId 'coduo'
+        @($status.Values | Where-Object Present).Count | Should -Be 2
+        $status.Values[0].Masked | Should -Be '****-****-****-****-ST12'
+        (Get-ItemProperty -LiteralPath ($testRoot + (Get-CdKeySpec -GameId 'coduo').Subkey)).codkey | Should -BeExactly 'ABCDEFGHJKLMNPQRST12'
+        ($script:logged -join "`n") | Should -Not -Match 'ABCDEFGHJKLMNPQR'
+        ($script:logged -join "`n") | Should -Not -Match 'ABCD-EFGH'
+    }
+
+    It 'backs up before changing and restores the earlier key' {
+        Set-GameCdKey -GameId 'cod4' -Key $key
+        $backupsBefore = @(Get-GameCdKeyBackups -GameId 'cod4')
+        Set-GameCdKey -GameId 'cod4' -Key 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZ99'
+        $latest = @(Get-GameCdKeyBackups -GameId 'cod4')[0]
+        @(Get-GameCdKeyBackups -GameId 'cod4').Count | Should -Be ($backupsBefore.Count + 1)
+        Restore-GameCdKey -GameId 'cod4' -BackupFile $latest.FullName
+        (Get-GameCdKeyStatus -GameId 'cod4').Values[0].Masked | Should -Be '****-****-****-****-ST12'
+    }
+
+    It 'restoring the backup taken when there was no key removes the key again' {
+        Set-GameCdKey -GameId 'cod2' -Key $key
+        $first = @(Get-GameCdKeyBackups -GameId 'cod2')[-1]
+        Restore-GameCdKey -GameId 'cod2' -BackupFile $first.FullName
+        (Get-GameCdKeyStatus -GameId 'cod2').Values[0].Present | Should -BeFalse
+    }
+}
+
+Describe 'Checking the player''s own BO3/BO4 executable' {
+    BeforeEach {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('bo3-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $exeBytes = [Text.Encoding]::ASCII.GetBytes('fake black ops 3 build')
+        [IO.File]::WriteAllBytes((Join-Path $folder 'BlackOps3.exe'), $exeBytes)
+        Mock Write-Host { }
+        $manifestFor = { param($Sha1, $Size) [pscustomobject]@{ Entries = @([pscustomobject]@{ Path = 'BlackOps3.exe'; Size = [int64]$Size; Sha1 = $Sha1; Dest = '' }) } }
+    }
+
+    It 'reports a match when the player''s file is the expected build' {
+        $result = Test-GameExecutable -GameId 'bo3' -GameFolder $folder -Manifest (& $manifestFor (Get-BytesSha1 $exeBytes) $exeBytes.Length)
+        $result.Exists | Should -BeTrue
+        $result.Matches | Should -BeTrue
+        $result.Sha256 | Should -Be (Get-BytesSha256 $exeBytes)
+    }
+
+    It 'reports a different build with the repair advice' {
+        $result = Test-GameExecutable -GameId 'bo3' -GameFolder $folder -Manifest (& $manifestFor ('0' * 40) 123)
+        $result.Matches | Should -BeFalse
+        $result.Repair | Should -Match 'Verify integrity'
+    }
+
+    It 'reports a missing executable without downloading anything' {
+        Remove-Item -LiteralPath (Join-Path $folder 'BlackOps3.exe')
+        Mock Invoke-ResumableDownload { throw 'must not download' }
+        $result = Test-GameExecutable -GameId 'bo3' -GameFolder $folder -Manifest (& $manifestFor ('0' * 40) 1)
+        $result.Exists | Should -BeFalse
+        Should -Invoke Invoke-ResumableDownload -Times 0
+    }
+}
+
 Describe 'Game detection' {
     BeforeEach {
         $SettingsDirectory = Join-Path $TestDrive ('settings-' + [guid]::NewGuid().ToString('N'))
