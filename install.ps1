@@ -446,6 +446,10 @@ function New-DefaultSettings {
         WindowTop = 0
         WindowMaximized = $false
         LastPage = 0
+        # Games page: one remembered folder per catalogue game (id -> folder), and the
+        # player name passed to the clients that take one.
+        Games = [pscustomobject]@{}
+        PlayerName = ''
         SavedAt = ''
         AppId = $AppId
     }
@@ -456,7 +460,7 @@ function Get-AppSettings {
     try {
         if (Test-Path -LiteralPath $SettingsFile -PathType Leaf) {
             $saved = Get-Content -LiteralPath $SettingsFile -Raw | ConvertFrom-Json
-            foreach ($name in @('GameFolder', 'Theme', 'Accent', 'ReduceMotion', 'WindowWidth', 'WindowHeight', 'WindowLeft', 'WindowTop', 'WindowMaximized', 'LastPage')) {
+            foreach ($name in @('GameFolder', 'Theme', 'Accent', 'ReduceMotion', 'WindowWidth', 'WindowHeight', 'WindowLeft', 'WindowTop', 'WindowMaximized', 'LastPage', 'Games', 'PlayerName')) {
                 $property = $saved.PSObject.Properties[$name]
                 if ($null -ne $property -and $null -ne $property.Value) { $settings.$name = $property.Value }
             }
@@ -2530,6 +2534,274 @@ function Invoke-SteamDowngrade {
     } else { Write-Warning "steam.exe was not found at the expected path: $steamExe" }
     
     Write-Host "`n=== Operation Complete ===" -ForegroundColor Cyan
+}
+
+# ==========================================
+# GAMES: CATALOGUE AND DETECTION
+# ==========================================
+# The older Call of Duty games and their community clients, researched from the CB
+# Servers launcher (docs/cb-launcher/). Executables, modes and arguments follow its
+# game_config.cpp; which client files may be downloaded follows the per-file audit in
+# docs/cb-launcher/manifests.md:
+#   Allow  - path patterns the client project publishes (anything else in a manifest is
+#            skipped, so a new, unaudited file is never downloaded automatically);
+#   Deny   - copies of the game's own files, never downloaded;
+#   Derive - a denied name the client needs, made from the player's own file when its
+#            SHA-1 matches the manifest (for example miles32.dll from mss32.dll).
+# Source 'cb' clients come from CB's public updater repository (CDN mirror, then
+# GitHub); 'github' clients from the project's own release, pinned by SHA-256;
+# 'plutonium' from Plutonium's own server.
+
+function New-CatalogClient {
+    param(
+        [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Name, [string]$Source = 'cb',
+        [string]$Manifest = '', [string]$Folder = '', [string[]]$Allow = @(), [string[]]$Deny = @(),
+        [hashtable]$Derive = @{}, [string]$AppData = '', [string[]]$GameFiles = @(), [object[]]$Assets = @()
+    )
+    [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
+        Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets) }
+}
+
+function New-CatalogMode {
+    param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Label, [string]$Kind = 'exe', [string]$Exe = '',
+          [string]$Arguments = '', [string[]]$Clients = @(), [bool]$UseName = $true, [string]$Uri = '')
+    [pscustomobject]@{ Id = $Id; Label = $Label; Kind = $Kind; Exe = $Exe; Arguments = $Arguments; Clients = @($Clients); UseName = $UseName; Uri = $Uri }
+}
+
+# The Plutonium bootstrapper and the AlterWare launcher are shared by several games.
+function Get-PlutoniumClient {
+    New-CatalogClient -Id 'plutonium' -Name 'Plutonium' -Source 'plutonium' -Assets @(
+        [pscustomobject]@{ Path = 'plutonium.exe'; Url = 'https://cdn.plutonium.pw/updater/plutonium.exe'; Size = 4863736; Sha256 = '85d1d1ca4d5881d9b98928c2006fb0eec9655e2705fe74088e6f974a19703f0f' })
+}
+
+function Get-GameCatalog {
+    $cod4Deny = @('iw3mp.exe')
+    $cod4Derive = @{ 'miles32.dll' = 'mss32.dll' }
+    @(
+        [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(2620); Detect = 'steam'
+            ValidFiles = @('CoDSP.exe', 'CoDMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
+            NeedsElevation = $false; DpiFix = @('CoDSP.exe', 'CoDMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(); Note = 'Plays with your own executables. The CoD1x client is not installed: it needs its own patched copy of CoDMP.exe.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'CoDSP.exe'), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDMP.exe'))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(2640); Detect = 'steam'
+            ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
+            NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = 'coduo'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(); Note = 'Plays with your own executables. The UOx client is not installed: it needs its own patched copy of CoDUOMP.exe.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'CoDUOSP.exe'), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDUOMP.exe'))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
+            ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $true; DpiFix = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); CdKey = 'cod2'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'cod2x' -Name 'CoD2x' -Manifest 'cod2x.json' -Folder 'cod2x/' -Allow @('mss32.dll', 'mss32_original.dll') -Deny @('mss32_original.dll') -Derive @{ 'mss32_original.dll' = 'mss32.dll' }))
+            Note = 'Needs administrator rights to start, like the CB launcher.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'CoD2SP_s.exe'), (New-CatalogMode 'mp' 'Multiplayer (CoD2x)' -Exe 'CoD2MP_s.exe' -Clients @('cod2x')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'cod4'; Name = 'Call of Duty 4: Modern Warfare'; Year = '2007'; SteamAppIds = @(7940); Detect = 'steam'
+            ValidFiles = @('binkw32.dll', 'iw3mp.exe', 'iw3sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = 'cod4'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(
+                (New-CatalogClient -Id 'iw3x' -Name 'iw3x (CoD4R)' -Manifest 'iw3x.json' -Folder 'iw3x/' -AppData 'CallofDuty4MW' -Allow @('bin/*', 'main/*', 'zone/*', 'mss32.dll', 'miles32.dll') -Deny ($cod4Deny + 'miles32.dll') -Derive $cod4Derive),
+                (New-CatalogClient -Id 'cod4x' -Name 'CoD4x' -Manifest 'cod4x-mp.json' -Folder 'cod4x-mp/' -AppData 'CallofDuty4MW' -Allow @('bin/*', 'main/*', 'zone/*', 'mss32.dll', 'miles32.dll') -Deny ($cod4Deny + 'miles32.dll') -Derive $cod4Derive),
+                (New-CatalogClient -Id 'iw3sp-mod' -Name 'IW3SP-Mod' -Manifest 'iw3sp-mod.json' -Folder 'iw3sp-mod/' -AppData 'CallofDuty4MW' -Allow @('bin/*', 'game.dll', 'iw3sp_data/*', 'iw3sp_mod.exe', 'mss32.dll', 'miles32.dll') -Deny @('miles32.dll') -Derive $cod4Derive))
+            Note = 'Multiplayer uses iw3x or CoD4x with your own iw3mp.exe; the campaign uses IW3SP-Mod.'
+            Modes = @((New-CatalogMode 'mp' 'Multiplayer' -Exe 'iw3mp.exe' -Clients @('iw3x', 'cod4x')), (New-CatalogMode 'sp' 'Campaign (IW3SP-Mod)' -Exe 'iw3sp_mod.exe' -Arguments '+set iw3sp_auto_update 0' -Clients @('iw3sp-mod')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'waw'; Name = 'Call of Duty: World at War'; Year = '2008'; SteamAppIds = @(10090); Detect = 'steam'
+            ValidFiles = @('binkw32.dll', 'CoDWaW.exe', 'CoDWaWmp.exe'); NameArgument = ''; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = 't4Path'; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((Get-PlutoniumClient)); Note = 'Plutonium needs a free Plutonium account; sign in with the Plutonium login button.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Kind 'plutonium' -Uri 't4sp' -Clients @('plutonium')), (New-CatalogMode 'mp' 'Multiplayer' -Kind 'plutonium' -Uri 't4mp' -Clients @('plutonium')), (New-CatalogMode 'zm' 'Zombies' -Kind 'plutonium' -Uri 't4sp' -Clients @('plutonium')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'mw2'; Name = 'Call of Duty: Modern Warfare 2'; Year = '2009'; SteamAppIds = @(10180); Detect = 'steam'
+            ValidFiles = @('binkw32.dll', 'iw4mp.exe', 'iw4sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'iw4x' -Name 'IW4x' -Manifest 'iw4x.json' -Folder 'iw4x/' -Allow @('iw4x.dll', 'iw4x.exe', 'companion64.dll', 'zonebuilder.exe', 'Unlinker.exe', 'alterware-launcher.exe', 'iw4x/*', 'zone/*', 'miles/*', 'crash-reporter/*') -Deny @('binkw32.dll', 'mss32.dll', 'iw4mp.exe', 'iw4sp.exe')))
+            Note = 'IW4x for multiplayer; the campaign and Spec Ops start through AlterWare, which IW4x includes.'
+            Modes = @((New-CatalogMode 'mp' 'Multiplayer' -Exe 'iw4x.exe' -Clients @('iw4x')), (New-CatalogMode 'sp' 'Campaign / Spec Ops' -Exe 'alterware-launcher.exe' -Arguments 'iw4x-sp --skip-launcher-update' -Clients @('iw4x') -UseName $false))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'bo1'; Name = 'Call of Duty: Black Ops'; Year = '2010'; SteamAppIds = @(42700); Detect = 'steam'
+            ValidFiles = @('binkw32.dll', 'BlackOps.exe', 'BlackOpsMP.exe'); NameArgument = ''; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = 't5Path'; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((Get-PlutoniumClient)); Note = 'Plutonium needs a free Plutonium account; sign in with the Plutonium login button.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Kind 'plutonium' -Uri 't5sp' -Clients @('plutonium')), (New-CatalogMode 'mp' 'Multiplayer' -Kind 'plutonium' -Uri 't5mp' -Clients @('plutonium')), (New-CatalogMode 'zm' 'Zombies' -Kind 'plutonium' -Uri 't5sp' -Clients @('plutonium')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'mw3'; Name = 'Call of Duty: Modern Warfare 3'; Year = '2011'; SteamAppIds = @(42680); Detect = 'steam'
+            ValidFiles = @('binkw32.dll', 'iw5mp.exe', 'iw5sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = 'iw5Path'; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((Get-PlutoniumClient), (New-CatalogClient -Id 'alterware' -Name 'AlterWare' -Manifest 'alt-launchers.json' -Folder 'alt-launchers/' -Allow @('alterware-launcher.exe')))
+            Note = 'Plutonium for multiplayer (needs a free Plutonium account); AlterWare for the campaign and Spec Ops.'
+            Modes = @((New-CatalogMode 'mp' 'Multiplayer' -Kind 'plutonium' -Uri 'iw5mp' -Clients @('plutonium')), (New-CatalogMode 'sp' 'Campaign / Spec Ops' -Exe 'alterware-launcher.exe' -Arguments 'iw5-mod --skip-launcher-update --pass "-singleplayer"' -Clients @('alterware') -UseName $false))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'bo2'; Name = 'Call of Duty: Black Ops II'; Year = '2012'; SteamAppIds = @(202970); Detect = 'steam'
+            ValidFiles = @('binkw32.dll', 't6mp.exe', 't6zm.exe', 't6sp.exe'); NameArgument = ''; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = 't6Path'; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((Get-PlutoniumClient), (New-CatalogClient -Id 't6sp-mod' -Name 'T6SP-Mod' -Source 'github' -Assets @(
+                    [pscustomobject]@{ Path = 'T6SP-Mod.exe'; Url = 'https://github.com/Rattpak/T6SP-Mod-Release/releases/download/v1.0.0-Beta/T6SP-Mod.exe'; Size = 11338240; Sha256 = '9224396f424e6c010f0e91f9893d453eb99c7265735fc785f9b5f166fa4394e7' },
+                    [pscustomobject]@{ Path = 't6sp-mod.dll'; Url = 'https://github.com/Rattpak/T6SP-Mod-Release/releases/download/v1.0.0-Beta/t6sp-mod.dll'; Size = 2551296; Sha256 = '965d010e8fdfbb454fb830d4e3ee108218223cbb101585f2c8ae407e63e956b5' })))
+            Note = 'Plutonium for multiplayer and Zombies (needs a free Plutonium account); T6SP-Mod for the campaign.'
+            Modes = @((New-CatalogMode 'mp' 'Multiplayer' -Kind 'plutonium' -Uri 't6mp' -Clients @('plutonium')), (New-CatalogMode 'zm' 'Zombies' -Kind 'plutonium' -Uri 't6zm' -Clients @('plutonium')), (New-CatalogMode 'sp' 'Campaign (T6SP-Mod)' -Exe 'T6SP-Mod.exe' -Clients @('t6sp-mod') -UseName $false))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'ghosts'; Name = 'Call of Duty: Ghosts'; Year = '2013'; SteamAppIds = @(209160); Detect = 'steam'
+            ValidFiles = @('iw6mp64_ship.exe', 'iw6sp64_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'iw6x' -Name 'IW6x' -Manifest 'iw6x.json' -Folder 'iw6x/' -Allow @('iw6x.exe', 'data/*'))); Note = ''
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'iw6x.exe' -Arguments '-singleplayer' -Clients @('iw6x')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'iw6x.exe' -Arguments '-multiplayer' -Clients @('iw6x')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'aw'; Name = 'Call of Duty: Advanced Warfare'; Year = '2014'; SteamAppIds = @(209650); Detect = 'steam'
+            ValidFiles = @('s1_sp64_ship.exe', 's1_mp64_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 's1x' -Name 'S1x' -Manifest 's1x.json' -Folder 's1x/' -Allow @('s1x.exe', 'data/*'))); Note = ''
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 's1x.exe' -Arguments '-singleplayer' -Clients @('s1x')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 's1x.exe' -Arguments '-multiplayer' -Clients @('s1x')), (New-CatalogMode 'zm' 'Exo Zombies' -Exe 's1x.exe' -Arguments '-zombies' -Clients @('s1x')), (New-CatalogMode 'sv' 'Exo Survival' -Exe 's1x.exe' -Arguments '-survival' -Clients @('s1x')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'bo3'; Name = 'Call of Duty: Black Ops III'; Year = '2015'; SteamAppIds = @(311210); Detect = 'steam'
+            ValidFiles = @('BlackOps3.exe'); NameArgument = '-name'; DefaultArguments = '-launch -noupdate'
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ProjectUrl = ''
+            ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Manifest = 'boiii.json'; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files.' }
+            Clients = @((New-CatalogClient -Id 'boiii' -Name 'BOIII' -Manifest 'boiii.json' -Folder 'boiii/' -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Deny @('BlackOps3.exe')))
+            Note = 'BOIII runs your own BlackOps3.exe; use Check game exe if it does not start.'
+            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'iw'; Name = 'Call of Duty: Infinite Warfare'; Year = '2016'; SteamAppIds = @(292730); Detect = 'steam'
+            ValidFiles = @('iw7_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'iw7-mod' -Name 'IW7-Mod' -Manifest 'iw7-mod/files.json' -Folder 'iw7-mod/data/' -AppData 'auroramod\iw7-mod' -GameFiles @('iw7-mod.exe') -Allow @('iw7-mod.exe', 'cdata/*')))
+            Note = ''; Modes = @((New-CatalogMode 'play' 'Play' -Exe 'iw7-mod.exe' -Clients @('iw7-mod')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'mwr'; Name = 'Call of Duty: Modern Warfare Remastered'; Year = '2017'; SteamAppIds = @(393080); Detect = 'steam'
+            ValidFiles = @('h1_sp64_ship.exe', 'h1_mp64_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'h1-mod' -Name 'H1-Mod' -Manifest 'h1-mod/files.json' -Folder 'h1-mod/data/' -AppData 'h1-mod' -GameFiles @('h1-mod.exe') -Allow @('h1-mod.exe', 'cdata/*')))
+            Note = ''; Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'h1-mod.exe' -Arguments '-singleplayer' -Clients @('h1-mod')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'h1-mod.exe' -Arguments '-multiplayer' -Clients @('h1-mod')))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'mw2cr'; Name = 'Call of Duty: Modern Warfare 2 Campaign Remastered'; Year = '2020'; SteamAppIds = @(); Detect = 'folder'
+            ValidFiles = @('MW2CR.exe', 'MW2 Campaign Remastered Launcher.exe'); NameArgument = ''; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'h2-mod' -Name 'H2-Mod' -Manifest 'h2-mod.json' -Folder 'h2-mod/' -AppData 'h2-mod' -GameFiles @('h2-mod.exe') -Allow @('h2-mod.exe', 'cdata/*')))
+            Note = 'Not sold on Steam; pick its folder with Change folder.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'h2-mod.exe' -Arguments '-singleplayer +set cg_auto_update 0' -Clients @('h2-mod') -UseName $false))
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'bo4'; Name = 'Call of Duty: Black Ops 4'; Year = '2018'; SteamAppIds = @(); Detect = 'battlenet'
+            ValidFiles = @('BlackOps4.exe', 'BlackOps4_boot.exe', 'Black Ops 4 Launcher.exe'); NameArgument = '-name'; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ProjectUrl = ''
+            ExeCheck = [pscustomobject]@{ File = 'BlackOps4.exe'; Manifest = 'project-bo4.json'; Repair = 'In Battle.net: select Black Ops 4 > the gear next to Play > Scan and Repair.' }
+            Clients = @(); Note = 'Check game exe still works on your own install.'; Modes = @()
+            Available = $false; UnavailableReason = 'The Project BO4 client is not installable: its support files match nothing its authors publish, and the rest of its package is Black Ops 4''s own executable and game data.' }
+        [pscustomobject]@{ Id = 'hmw'; Name = 'HorizonMW'; Year = '2024'; SteamAppIds = @(393080); Detect = 'steam'
+            ValidFiles = @('h1_mp64_ship.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = 'https://github.com/HorizonMW/HorizonMW-Client'
+            Clients = @(); Note = 'Runs on Modern Warfare Remastered.'; Modes = @()
+            Available = $false; UnavailableReason = 'HorizonMW publishes no client builds, only source code. Open the project to build it yourself (you need Modern Warfare Remastered).' }
+    )
+}
+
+# What the installer does with one manifest entry of a client:
+#   'derive' - a denied name with a Derive rule: made from the player's own file;
+#   'deny'   - a copy of one of the game's own files: never downloaded;
+#   'allow'  - matches one of the client's audited path patterns: downloaded;
+#   'skip'   - anything else (for example a file added to the manifest after the
+#              audit): not downloaded until the catalogue is updated.
+function Get-ClientEntryVerdict {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$Path)
+    $normal = ($Path -replace '\\', '/')
+    $leaf = ($normal -split '/')[-1]
+    foreach ($denied in $Client.Deny) {
+        if ($leaf -ieq $denied -or $normal -ieq $denied) {
+            foreach ($key in $Client.Derive.Keys) { if ($leaf -ieq $key) { return 'derive' } }
+            return 'deny'
+        }
+    }
+    foreach ($pattern in $Client.Allow) { if ($normal -like $pattern) { return 'allow' } }
+    return 'skip'
+}
+
+function Get-CatalogGame {
+    param([Parameter(Mandatory)][string]$Id)
+    $game = Get-GameCatalog | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if ($null -eq $game) { throw "Unknown game: $Id" }
+    return $game
+}
+
+# Where a client keeps the files that do not go into the game folder. In sandbox mode
+# everything stays inside the sandbox.
+function Get-ClientAppDataRoot {
+    if (Test-SandboxMode) {
+        $root = Join-Path $global:SandboxRoot 'AppData'
+        if (-not (Test-Path -LiteralPath $root)) { $null = New-Item -ItemType Directory -Path $root -Force }
+        return $root
+    }
+    return $env:LOCALAPPDATA
+}
+
+# A folder is the game when at least one of its marker files is there (as CB checks).
+function Test-CatalogGameFolder {
+    param([Parameter(Mandatory)]$Game, [string]$Folder)
+    if ([string]::IsNullOrWhiteSpace($Folder) -or -not (Test-Path -LiteralPath $Folder -PathType Container)) { return $false }
+    foreach ($file in $Game.ValidFiles) { if (Test-Path -LiteralPath (Join-Path $Folder $file) -PathType Leaf) { return $true } }
+    return $false
+}
+
+function Get-CatalogGameFolder {
+    param([Parameter(Mandatory)][string]$Id)
+    $games = (Get-AppSettings).Games
+    if ($null -eq $games) { return $null }
+    $property = $games.PSObject.Properties[$Id]
+    if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) { return $null }
+    $folder = [string]$property.Value
+    if (Test-Path -LiteralPath $folder -PathType Container) { return $folder }
+    return $null
+}
+
+function Save-CatalogGameFolder {
+    param([Parameter(Mandatory)][string]$Id, [string]$Folder = '')
+    $settings = Get-AppSettings
+    $games = [ordered]@{}
+    if ($null -ne $settings.Games) { foreach ($property in $settings.Games.PSObject.Properties) { $games[$property.Name] = [string]$property.Value } }
+    if ([string]::IsNullOrWhiteSpace($Folder)) { $games.Remove($Id) }
+    else { $games[$Id] = [IO.Path]::GetFullPath($Folder).TrimEnd('\') }
+    $settings.Games = [pscustomobject]$games
+    return (Save-AppSettings -Settings $settings)
+}
+
+# Battle.net games have no Steam manifest; their uninstall entry names the folder.
+function Find-BattleNetInstall {
+    param([string[]]$DisplayNames)
+    $keys = @('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
+    foreach ($key in $keys) {
+        foreach ($entry in @(Get-ItemProperty -Path $key -ErrorAction SilentlyContinue)) {
+            $name = [string]$entry.DisplayName
+            foreach ($wanted in $DisplayNames) {
+                if ($name -like $wanted -and $entry.InstallLocation -and (Test-Path -LiteralPath ([string]$entry.InstallLocation) -PathType Container)) { return ([string]$entry.InstallLocation).TrimEnd('\') }
+            }
+        }
+    }
+    return $null
+}
+
+# Finds a catalogue game: the saved folder first, then the Steam libraries (the app's
+# manifest names its install folder), then Battle.net. Every hit is checked against
+# the game's marker files.
+function Find-CatalogGame {
+    param([Parameter(Mandatory)]$Game)
+    $saved = Get-CatalogGameFolder -Id $Game.Id
+    if ($saved -and (Test-CatalogGameFolder -Game $Game -Folder $saved)) { return [pscustomobject]@{ Folder = $saved; Source = 'saved' } }
+    foreach ($library in @(Get-SteamLibraries)) {
+        foreach ($appId in $Game.SteamAppIds) {
+            $manifest = Join-Path $library "steamapps\appmanifest_$appId.acf"
+            if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { continue }
+            $match = [regex]::Match((Get-Content -LiteralPath $manifest -Raw), '"installdir"\s*"([^"]+)"')
+            if (-not $match.Success) { continue }
+            $installDir = $match.Groups[1].Value
+            if ([IO.Path]::IsPathRooted($installDir) -or $installDir.Contains('..') -or $installDir.Contains(':')) { continue }
+            $candidate = Join-Path $library "steamapps\common\$installDir"
+            if (Test-CatalogGameFolder -Game $Game -Folder $candidate) { return [pscustomobject]@{ Folder = [IO.Path]::GetFullPath($candidate).TrimEnd('\'); Source = 'steam' } }
+        }
+    }
+    if ($Game.Detect -eq 'battlenet' -and -not (Test-SandboxMode)) {
+        $folder = Find-BattleNetInstall -DisplayNames @('Call of Duty*Black Ops 4*', 'Call of Duty: Black Ops 4*')
+        if ($folder -and (Test-CatalogGameFolder -Game $Game -Folder $folder)) { return [pscustomobject]@{ Folder = $folder; Source = 'battlenet' } }
+    }
+    return $null
 }
 
 # ==========================================

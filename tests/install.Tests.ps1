@@ -1147,3 +1147,107 @@ Describe 'Sandbox mode' {
         Get-Text (Join-Path $sandbox 'Steam\steamapps\appmanifest_1938090.acf') | Should -Match '"StateFlags"\s+"4"'
     }
 }
+
+Describe 'Game catalogue' {
+    BeforeAll {
+        $catalog = @(Get-GameCatalog)
+        $auditPath = Join-Path $PSScriptRoot '..\docs\cb-launcher\audit.json'
+        $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json
+    }
+
+    It 'has unique ids and every field the Games page needs' {
+        @($catalog.Id | Select-Object -Unique).Count | Should -Be $catalog.Count
+        foreach ($game in $catalog) {
+            $game.Name | Should -Not -BeNullOrEmpty -Because $game.Id
+            @($game.ValidFiles).Count | Should -BeGreaterThan 0 -Because $game.Id
+            if (-not $game.Available) { $game.UnavailableReason | Should -Not -BeNullOrEmpty -Because $game.Id }
+        }
+    }
+
+    It 'only names clients a game actually has in its modes' {
+        foreach ($game in $catalog) {
+            $ids = @($game.Clients | ForEach-Object { $_.Id })
+            foreach ($mode in $game.Modes) { foreach ($client in $mode.Clients) { $ids | Should -Contain $client -Because "$($game.Id) mode $($mode.Id)" } }
+        }
+    }
+
+    It 'pins a SHA-256 for every file it downloads outside CB manifests' {
+        foreach ($client in @($catalog.Clients | Where-Object { $_.Source -ne 'cb' })) {
+            @($client.Assets).Count | Should -BeGreaterThan 0 -Because $client.Id
+            foreach ($asset in $client.Assets) { $asset.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because "$($client.Id) $($asset.Path)" }
+        }
+    }
+
+    It 'never downloads a file the audit denied or could not trace, and derives what the audit derives' {
+        foreach ($client in @($catalog.Clients | Where-Object { $_.Source -eq 'cb' } | Sort-Object Id -Unique)) {
+            $manifest = $audit.Manifests | Where-Object { $_.Manifest -eq $client.Manifest }
+            $manifest | Should -Not -BeNullOrEmpty -Because "$($client.Id) uses $($client.Manifest)"
+            foreach ($file in $manifest.Files) {
+                $verdict = Get-ClientEntryVerdict -Client $client -Path $file.Path
+                if ($verdict -eq 'allow') { $file.Verdict | Should -Be 'allowed' -Because "$($client.Id): $($file.Path)" }
+                if ($file.Verdict -eq 'derive') { $verdict | Should -Be 'derive' -Because "$($client.Id): $($file.Path)" }
+                if ($file.Verdict -in 'denied', 'no-trace') { $verdict | Should -Not -Be 'allow' -Because "$($client.Id): $($file.Path)" }
+            }
+        }
+    }
+
+    It 'downloads the files each client needs to run' {
+        $needed = @{ 'iw4x' = 'iw4x.exe'; 'iw6x' = 'iw6x.exe'; 's1x' = 's1x.exe'; 'boiii' = 'boiii.exe'; 'h1-mod' = 'h1-mod.exe'; 'iw7-mod' = 'iw7-mod.exe'; 'h2-mod' = 'h2-mod.exe'; 'cod4x' = 'mss32.dll'; 'iw3x' = 'mss32.dll'; 'iw3sp-mod' = 'iw3sp_mod.exe'; 'cod2x' = 'mss32.dll'; 'alterware' = 'alterware-launcher.exe' }
+        foreach ($id in $needed.Keys) {
+            $client = $catalog.Clients | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+            Get-ClientEntryVerdict -Client $client -Path $needed[$id] | Should -Be 'allow' -Because $id
+        }
+    }
+
+    It 'skips a file added to a manifest after the audit' {
+        $client = ($catalog | Where-Object Id -eq 'ghosts').Clients[0]
+        Get-ClientEntryVerdict -Client $client -Path 'something-new.exe' | Should -Be 'skip'
+        Get-ClientEntryVerdict -Client $client -Path 'data/scripts/new.gsc' | Should -Be 'allow'
+    }
+}
+
+Describe 'Game detection' {
+    BeforeEach {
+        $SettingsDirectory = Join-Path $TestDrive ('settings-' + [guid]::NewGuid().ToString('N'))
+        $SettingsFile = Join-Path $SettingsDirectory 'settings.json'
+        $library = Join-Path $TestDrive ('library-' + [guid]::NewGuid().ToString('N'))
+        $cod4 = Join-Path $library 'steamapps\common\Call of Duty 4'
+        $null = New-Item -ItemType Directory -Path $cod4 -Force
+        Set-Content -LiteralPath (Join-Path $cod4 'iw3mp.exe') -Value 'fake'
+        Set-Content -LiteralPath (Join-Path $library 'steamapps\appmanifest_7940.acf') -Value "`"AppState`"`n{`n`t`"appid`"`t`t`"7940`"`n`t`"installdir`"`t`t`"Call of Duty 4`"`n}"
+        Mock Get-SteamLibraries { @($library) }
+        Mock Write-Host { }
+        $game = Get-CatalogGame -Id 'cod4'
+    }
+
+    It 'finds a game through its Steam app manifest' {
+        $found = Find-CatalogGame -Game $game
+        $found.Folder | Should -Be ([IO.Path]::GetFullPath($cod4))
+        $found.Source | Should -Be 'steam'
+    }
+
+    It 'does not accept a folder without the game''s files' {
+        Remove-Item -LiteralPath (Join-Path $cod4 'iw3mp.exe')
+        Find-CatalogGame -Game $game | Should -BeNullOrEmpty
+        Test-CatalogGameFolder -Game $game -Folder $cod4 | Should -BeFalse
+    }
+
+    It 'prefers a saved folder and keeps the MW4 settings apart' {
+        $other = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod4-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $other 'iw3sp.exe') -Value 'fake'
+        Save-CatalogGameFolder -Id 'cod4' -Folder $other | Should -BeTrue
+        (Find-CatalogGame -Game $game).Folder | Should -Be $other.TrimEnd('\')
+        (Find-CatalogGame -Game $game).Source | Should -Be 'saved'
+        (Get-AppSettings).GameFolder | Should -Be ''
+        Save-CatalogGameFolder -Id 'cod4' -Folder '' | Should -BeTrue
+        Get-CatalogGameFolder -Id 'cod4' | Should -BeNullOrEmpty
+    }
+
+    It 'loads settings files written before the Games page existed' {
+        $null = New-Item -ItemType Directory -Path $SettingsDirectory -Force
+        Set-Content -LiteralPath $SettingsFile -Value '{ "GameFolder": "", "Theme": "light" }'
+        (Get-AppSettings).Theme | Should -Be 'light'
+        Get-CatalogGameFolder -Id 'cod4' | Should -BeNullOrEmpty
+        (Find-CatalogGame -Game $game).Source | Should -Be 'steam'
+    }
+}
