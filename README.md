@@ -35,6 +35,7 @@ No installation, no leftovers: the script is the program.
 | **Fix Installer** | Installs or restores the fix, removes it again by putting back exactly the originals its backups recorded, then deletes `og files` |
 | **Languages** | Installs a language pack, switches the active preset, removes a pack |
 | **Downgrade Version** | Normal or Nuclear downgrade for "Invalid game version" |
+| **Games** | The older Call of Duty games you own on Steam, with their community clients: install, update, remove, play every mode, check BO3/BO4 executables, enter your own CD key (see below) |
 
 The game folder is detected from your Steam libraries. If detection fails, **Change
 folder** lets you pick it by hand; the choice is saved and used for every action, and
@@ -61,6 +62,9 @@ elevated, Steam libraries, the folder in use) so a bug report is one file.
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\settings.json` | Your saved folder, theme, accent and window state |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\worker.json`, `last-run.json` | Hand-off between the normal window and the administrator window during a downgrade; the first is removed when the run hands back, the second is how the normal window reports the result. Always written to the folder of the account that started the utility, even when the administrator is a different account |
 | `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\logs` | The log of an administrator downgrade run, saved automatically before that window closes (same folder rule as above) |
+| Games: the game's folder | A client's files, a record of them (`.codhq-client-<id>.json`) and copies of any of your game files it replaced (`.codhq-backups\<id>\`). **Remove** puts the folder back exactly |
+| Games: `%LOCALAPPDATA%\<client>` | Files some clients keep outside the game: `CallofDuty4MW`, `boiii`, `h1-mod`, `auroramod\iw7-mod`, `h2-mod`, and Plutonium's own `Plutonium` folder (its `config.json` gets the game paths; your login is kept) |
+| Games: `HKCU\...\Activision\...` | Only when you enter your own CD key for CoD2, UO or CoD4: the value the game reads, backed up first to `%LOCALAPPDATA%\CallOfDutyHQ-SetupUtility\cdkey-backups`. The oldest games also get Windows' `HIGHDPIAWARE` compatibility flag, as the CB launcher sets it |
 
 Nothing else is written outside those paths. `og files` is deleted only after its
 originals have been put back: by **Remove fix** once every file is restored, and at
@@ -75,7 +79,10 @@ Removing the fix also deletes the folders the fix created, once they are empty.
 
 **Network access:** GitHub releases (fix archive, language packs and downgrade
 manifests) and `ps.lua.tools` (only during the Nuclear downgrade, to install
-BetterSteamTools). Removing the fix needs no network, except for backups made by
+BetterSteamTools). The Games page also uses CB Servers' public client repository (its
+CDN `cdn-na.cbservers.xyz` / `cdn-eu.cbservers.dev` under `/updater/`, then GitHub
+`CBServers/updater`), Plutonium's `cdn.plutonium.pw`, and the T6SP-Mod release on
+GitHub, only when you install, update or check a client. Removing the fix needs no network, except for backups made by
 versions from before the backup record existed: for those the fix archive is
 downloaded once and compared file by file, so only files that are exactly the fix's
 are deleted, each original is taken from the oldest backup that really holds one, and
@@ -88,6 +95,48 @@ to four times, continuing from the bytes already received, so a multi-gigabyte
 language pack does not start over. After replacing a release file, run
 `tools\Get-ReleaseHashes.ps1` and paste its output into `Get-ReleaseAssetHash` in the
 same commit; until then the utility refuses the new file.
+
+## Games
+
+The **Games** page lists 17 older titles: Call of Duty, United Offensive, CoD2, CoD4,
+World at War, MW2, Black Ops, MW3, Black Ops II, Ghosts, Advanced Warfare, Black Ops
+III, Infinite Warfare, Modern Warfare Remastered, MW2 Campaign Remastered, Black Ops 4
+and HorizonMW. It finds each game in your Steam libraries (or the folder you pick)
+and installs the community client that brings it back online:
+
+| Clients | Games |
+| --- | --- |
+| Plutonium | World at War, Black Ops, Black Ops II (MP, Zombies), MW3 (MP) |
+| IW4x, AlterWare | MW2 (MP; campaign and Spec Ops), MW3 (campaign, Spec Ops) |
+| iw3x or CoD4x, IW3SP-Mod | CoD4 (MP; campaign) |
+| CoD2x | CoD2 (MP) |
+| T6SP-Mod | Black Ops II (campaign) |
+| IW6x, S1x, BOIII, IW7-Mod, H1-Mod, H2-Mod | Ghosts, AW, BO3, IW, MWR, MW2 Campaign Remastered |
+
+How it decides what to download comes from a file-by-file audit of the CB Servers
+launcher's public client manifests (`docs/cb-launcher/`, re-run with
+`tools\Invoke-CbManifestAudit.ps1`):
+
+- a client file is downloaded only when the client project itself publishes it, and
+  checked against its SHA-1 (or a pinned SHA-256);
+- copies of a game's own files (executables, the Bink and Miles libraries, BO3/BO4
+  executables) are never downloaded: your own are used, and where a client needs one
+  under another name it is made from yours when it is the right build;
+- a file added to a manifest after the audit is skipped until the catalogue is updated;
+- full game downloads, CB's copies of the BO3/BO4 executables and the CD keys built
+  into the CB launcher are not used (`docs/cb-launcher/unavailable.md` explains why
+  and what to do instead).
+
+**Play** builds the exact command line the CB launcher uses for each mode and adds
+your player name; it warns when your game build differs from the one the client was
+installed against. **Check game exe** compares your own `BlackOps3.exe` /
+`BlackOps4.exe` with the build its client expects. **CD key** shows your key masked,
+backs it up, saves the key you type (from Steam: right-click the game > Manage > CD
+Keys) and restores a backup; keys never appear in the activity log. Plutonium games
+need a free Plutonium account: use **Plutonium login** once.
+
+The Black Ops 4 (Project BO4) and HorizonMW clients are not installable; their cards
+say why.
 
 ## The Nuclear downgrade
 
@@ -186,9 +235,13 @@ install and removal (including backup records, failed installs and backups from 
 versions), language packs, the `configs.user.ini` edits, ZIP path checks, the
 downgrade's checks before it starts and its download-first order, its Lua/manifest
 backup and restore, the out-of-process script runner, the administrator hand-off
-folder, sandbox mode, and the downloader itself (retries, resume and checksums, against
-a small local test server). Steam, services, processes and prompts are mocked, so
-running them touches nothing on your PC.
+folder, sandbox mode, and the downloader itself (retries, resume, HTTP status codes and
+checksums, against a small local test server). For the Games page: the catalogue
+against the audit (nothing denied or untraced can ever be downloaded), detection,
+CB manifest reading, client install / update / remove with backups, derived files,
+conflicts and rollback, Plutonium's `config.json`, launch commands, the executable
+check, and the CD-key cycle against a throwaway registry key. Steam, services,
+processes and prompts are mocked, so running them touches nothing on your PC.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck

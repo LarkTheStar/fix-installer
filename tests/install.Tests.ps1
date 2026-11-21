@@ -1564,17 +1564,17 @@ Describe 'CD keys (the player''s own)' -Skip:([bool]$IsLinux -or [bool]$IsMacOS)
 
     It 'backs up before changing and restores the earlier key' {
         Set-GameCdKey -GameId 'cod4' -Key $key
-        $backupsBefore = @(Get-GameCdKeyBackups -GameId 'cod4')
+        $backupsBefore = @(Get-GameCdKeyBackupList -GameId 'cod4')
         Set-GameCdKey -GameId 'cod4' -Key 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZ99'
-        $latest = @(Get-GameCdKeyBackups -GameId 'cod4')[0]
-        @(Get-GameCdKeyBackups -GameId 'cod4').Count | Should -Be ($backupsBefore.Count + 1)
+        $latest = @(Get-GameCdKeyBackupList -GameId 'cod4')[0]
+        @(Get-GameCdKeyBackupList -GameId 'cod4').Count | Should -Be ($backupsBefore.Count + 1)
         Restore-GameCdKey -GameId 'cod4' -BackupFile $latest.FullName
         (Get-GameCdKeyStatus -GameId 'cod4').Values[0].Masked | Should -Be '****-****-****-****-ST12'
     }
 
     It 'restoring the backup taken when there was no key removes the key again' {
         Set-GameCdKey -GameId 'cod2' -Key $key
-        $first = @(Get-GameCdKeyBackups -GameId 'cod2')[-1]
+        $first = @(Get-GameCdKeyBackupList -GameId 'cod2')[-1]
         Restore-GameCdKey -GameId 'cod2' -BackupFile $first.FullName
         (Get-GameCdKeyStatus -GameId 'cod2').Values[0].Present | Should -BeFalse
     }

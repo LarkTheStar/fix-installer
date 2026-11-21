@@ -907,7 +907,7 @@ function Invoke-ResumableDownload {
 
 # CB's client update sources, in the launcher's own order: its CDN mirrors (North
 # America, then Europe), then GitHub as the last resort.
-function Get-ClientUpdateBases {
+function Get-ClientUpdateSource {
     return @('https://cdn-na.cbservers.xyz/updater/', 'https://cdn-eu.cbservers.dev/updater/', 'https://github.com/CBServers/updater/raw/main/updater/')
 }
 
@@ -916,7 +916,7 @@ function Get-ClientUpdateBases {
 # the entries, the ManifestHash and the base URL it came from (files are fetched from
 # the same base first).
 function Get-ClientManifest {
-    param([Parameter(Mandatory)][string]$Manifest, [string[]]$Bases = @(Get-ClientUpdateBases))
+    param([Parameter(Mandatory)][string]$Manifest, [string[]]$Bases = @(Get-ClientUpdateSource))
     $errors = [System.Collections.Generic.List[string]]::new()
     foreach ($base in $Bases) {
         try {
@@ -2912,7 +2912,7 @@ function Write-ClientRecord {
 }
 
 # Every file the other installed clients of this game placed (full path -> owner).
-function Get-ClientFileOwners {
+function Get-ClientFileOwnerMap {
     param([Parameter(Mandatory)][string]$GameFolder, [string]$ExceptClientId = '')
     $owners = @{}
     foreach ($recordFile in @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
@@ -3013,7 +3013,7 @@ function Save-ClientFile {
         return $result
     }
     $relativeUrl = $Plan.Client.Folder + ((($Step.Path -split '/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/') + '?' + $Step.Sha1
-    $bases = @($Plan.Base) + @(Get-ClientUpdateBases | Where-Object { $_ -ne $Plan.Base })
+    $bases = @($Plan.Base) + @(Get-ClientUpdateSource | Where-Object { $_ -ne $Plan.Base })
     $lastError = $null
     foreach ($base in $bases) {
         try {
@@ -3057,7 +3057,7 @@ function Install-GameClient {
     }
     # Two clients that put different versions of the same file in place cannot be
     # installed together.
-    $owners = Get-ClientFileOwners -GameFolder $GameFolder -ExceptClientId $client.Id
+    $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $client.Id
     foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) {
         $owner = $owners[$step.Target.ToLowerInvariant()]
         if ($owner -and $step.Sha1 -and $owner.Sha1 -and $owner.Sha1 -ne $step.Sha1) {
@@ -3186,7 +3186,7 @@ function Remove-GameClient {
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
     $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $ClientId
     if ($null -eq $record) { Write-Info "$ClientId is not installed in $GameFolder."; return }
-    $owners = Get-ClientFileOwners -GameFolder $GameFolder -ExceptClientId $ClientId
+    $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $ClientId
     $removed = 0; $restored = 0; $shared = 0
     foreach ($file in @($record.Files)) {
         $target = [string]$file.Target
@@ -3560,7 +3560,7 @@ function Backup-GameCdKey {
     return $file
 }
 
-function Get-GameCdKeyBackups {
+function Get-GameCdKeyBackupList {
     param([Parameter(Mandatory)][string]$GameId)
     $folder = Get-CdKeyBackupFolder
     if (-not (Test-Path -LiteralPath $folder)) { return @() }
@@ -6405,7 +6405,7 @@ $global:GameActionMap = @{
                   if (-not $key) { Stop-Cancelled 'No key was entered.' }
                   Set-GameCdKey -GameId $game.Id -Key $key }
             '2' { $null = Backup-GameCdKey -GameId $game.Id }
-            '3' { $backups = @(Get-GameCdKeyBackups -GameId $game.Id)
+            '3' { $backups = @(Get-GameCdKeyBackupList -GameId $game.Id)
                   if ($backups.Count -eq 0) { Write-Info 'There are no backups yet.'; return }
                   for ($i = 0; $i -lt $backups.Count; $i++) { Write-Host "[$($i + 1)] $($backups[$i].Name)" }
                   $choice = 0
