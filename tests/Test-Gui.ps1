@@ -123,7 +123,7 @@ try {
     Check 'the window finishes starting up' (Wait-Until -Seconds $TimeoutSeconds { (& $readLog) -match 'Ready\. Choose an action' })
     Start-Sleep -Milliseconds 500
 
-    $pages = [ordered]@{ NavFixes = 'Fix'; NavLanguages = 'Language'; NavDowngrade = 'Downgrade'; NavOverview = 'Overview' }
+    $pages = [ordered]@{ NavFixes = 'Fix'; NavLanguages = 'Language'; NavDowngrade = 'Downgrade'; NavGames = 'Games'; NavOverview = 'Overview' }
     foreach ($nav in $pages.Keys) {
         $button = Find-ById $window $nav
         Check "$nav exists" ($null -ne $button)
@@ -137,6 +137,13 @@ try {
             $opened = Wait-Until -Seconds 5 { (Get-Text $window 'HeaderTitle') -like "*$expected*" }
         }
         Check "$nav opens its page" $opened
+        if ($nav -eq 'NavGames' -and $opened) {
+            # The cards are built from the catalogue when the page first opens; detection
+            # only reads the Steam libraries, so this touches nothing.
+            $cardTitles = { @($window.FindAll($TS::Descendants, [System.Windows.Automation.PropertyCondition]::new($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)) | ForEach-Object { $_.Current.Name } | Where-Object { $_ -like 'Call of Duty*(*)' -or $_ -like 'HorizonMW*(*)' }) }
+            Check 'the Games page shows a card for every catalogue game' (Wait-Until -Seconds 20 { (& $cardTitles).Count -ge 17 })
+            Check 'the Games page has its player name box' ($null -ne (Find-ById $window 'PlayerNameBox'))
+        }
     }
 
     $themeBefore = (Find-ById $window 'ThemeToggleIcon').Current.Name

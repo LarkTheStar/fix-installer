@@ -100,6 +100,20 @@ if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
     Write-SandboxFile 'Game\!start_sp26.bat' "@echo off`r`necho This is the sandbox's fake game launcher.`r`npause`r`n"
     Write-SandboxFile 'Game\sp26\steam_settings\configs.user.ini' "[user::general]`r`naccount_name=sandbox`r`nlanguage=english`r`n"
 
+    # Fake Steam installs of a few Games-page titles: each has its Steam app manifest
+    # and the marker file the installer looks for (placeholder text, not the games).
+    $fakeGames = @(
+        @{ AppId = 2630; Dir = 'Call of Duty 2'; Files = @('CoD2SP_s.exe', 'CoD2MP_s.exe', 'mss32.dll') }
+        @{ AppId = 7940; Dir = 'Call of Duty 4'; Files = @('iw3mp.exe', 'iw3sp.exe', 'binkw32.dll', 'mss32.dll') }
+        @{ AppId = 10180; Dir = 'Call of Duty Modern Warfare 2'; Files = @('iw4mp.exe', 'iw4sp.exe', 'binkw32.dll') }
+        @{ AppId = 202970; Dir = 'Call of Duty Black Ops II'; Files = @('t6mp.exe', 't6zm.exe', 't6sp.exe', 'binkw32.dll') }
+        @{ AppId = 209160; Dir = 'Call of Duty Ghosts'; Files = @('iw6mp64_ship.exe', 'iw6sp64_ship.exe') }
+    )
+    foreach ($fake in $fakeGames) {
+        Write-SandboxFile ("Steam\steamapps\appmanifest_{0}.acf" -f $fake.AppId) ("`"AppState`"`n{`n`t`"appid`"`t`t`"$($fake.AppId)`"`n`t`"installdir`"`t`t`"$($fake.Dir)`"`n}`n")
+        foreach ($file in $fake.Files) { Write-SandboxFile ("Steam\steamapps\common\{0}\{1}" -f $fake.Dir, $file) "placeholder $file (sandbox)" }
+    }
+
     $null = New-Item -ItemType Directory -Path (Join-Path $Path 'Settings') -Force
     Write-Output "Sandbox created at $Path"
 } else {

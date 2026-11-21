@@ -4445,6 +4445,13 @@ function Restore-GameCdKey {
                             <TextBlock Text="Downgrade Version" FontSize="14" VerticalAlignment="Center"/>
                         </StackPanel>
                     </RadioButton>
+
+                    <RadioButton x:Name="NavGames" Style="{StaticResource NavButton}" ToolTip="The older Call of Duty games and their community clients">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE7FC;" FontFamily="Segoe MDL2 Assets" FontSize="16" Margin="0,0,15,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Games" FontSize="14" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </RadioButton>
                 </StackPanel>
                 
                 <StackPanel Grid.Row="2" VerticalAlignment="Center" Margin="25,0">
@@ -4717,6 +4724,34 @@ function Restore-GameCdKey {
                         </Button>
                         <Border Style="{StaticResource HintCard}">
                             <TextBlock Style="{StaticResource HintText}" Text="Both options close and restart Steam, and need administrator rights (accept the UAC prompt if it appears). Try Normal first."/>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <ScrollViewer x:Name="PageGames" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="0" PanningMode="VerticalOnly">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource PageIntro}" Text="The older Call of Duty games you own on Steam, with their community clients. Clients are checked file by file; your own game files are never replaced by downloaded copies."/>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Player name" FontSize="13" Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <TextBox x:Name="PlayerNameBox" Grid.Column="1" MaxLength="16" FontSize="13" Padding="8,5" VerticalContentAlignment="Center"
+                                         Background="{DynamicResource InputBg}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource Border}" CaretBrush="{DynamicResource TextPrimary}"
+                                         ToolTip="Passed to the clients that take a name (16 characters at most)"/>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="12,0,0,0">
+                                    <Button x:Name="BtnSavePlayerName" Style="{StaticResource SmallButton}" Content="Save name" Margin="0,0,8,0"/>
+                                    <Button x:Name="BtnGamesRefresh" Style="{StaticResource SmallButton}" Content="Refresh" Margin="0,0,8,0" ToolTip="Look for the games again"/>
+                                    <Button x:Name="BtnGamesCheckUpdates" Style="{StaticResource SmallButton}" Content="Check all for updates" ToolTip="Ask each installed client's source whether files changed"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <StackPanel x:Name="GamesList"/>
+                        <Border Style="{StaticResource HintCard}">
+                            <TextBlock Style="{StaticResource HintText}" Text="Plutonium games need a free Plutonium account (use Plutonium login once). Black Ops 4 and HorizonMW clients are not installable; their cards say why. The research behind this page is in docs/cb-launcher."/>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
@@ -5783,9 +5818,9 @@ $window.FindName('BtnChooseFolder').Add_Click({
     }
 })
 
-$navButtons = @("NavOverview", "NavFixes", "NavLanguages", "NavDowngrade")
-$pages = @("PageOverview", "PageFixes", "PageLanguages", "PageDowngrade")
-$titles = @("Overview", "Fix Installer", "Languages", "Downgrade Version")
+$navButtons = @("NavOverview", "NavFixes", "NavLanguages", "NavDowngrade", "NavGames")
+$pages = @("PageOverview", "PageFixes", "PageLanguages", "PageDowngrade", "PageGames")
+$titles = @("Overview", "Fix Installer", "Languages", "Downgrade Version", "Games")
 
 # Single navigation helper, also used to restore the last opened page.
 # Navigation is never blocked: the pages are just views, and a guard here could
@@ -6297,6 +6332,201 @@ foreach ($buttonName in $actionButtonMap.Keys) {
     })
 }
 
+# ==========================================
+# GAMES PAGE
+# ==========================================
+# Update counts from the last "Check all for updates" (key "<game>|<client>").
+$global:GameUpdateCounts = @{}
+
+# A small dialog for a secret (the CD key): typed into a password box, never echoed to
+# the activity log. Returns '' when cancelled.
+function Read-SecretInput {
+    param([Parameter(Mandatory)][string]$Prompt, [string]$Title = 'Enter your CD key')
+    Add-LogEntry -Text ('? ' + $Prompt) -Color '#606070'
+    $dialog = New-Object System.Windows.Window
+    $dialog.Title = $Title; $dialog.Width = 520; $dialog.SizeToContent = 'Height'; $dialog.ResizeMode = 'NoResize'
+    $dialog.WindowStyle = 'ToolWindow'; $dialog.ShowInTaskbar = $false; $dialog.FontFamily = 'Segoe UI'
+    $dialog.Background = Get-ThemeBrush 'PopupBg'
+    if (($global:MainWindow -is [System.Windows.Window]) -and $global:MainWindow.IsVisible) { $dialog.Owner = $global:MainWindow; $dialog.WindowStartupLocation = 'CenterOwner' } else { $dialog.WindowStartupLocation = 'CenterScreen' }
+    $panel = New-Object System.Windows.Controls.StackPanel; $panel.Margin = '24,20,24,18'
+    $label = New-Object System.Windows.Controls.TextBlock; $label.Text = $Prompt; $label.TextWrapping = 'Wrap'; $label.FontSize = 14; $label.Margin = '0,0,0,12'; $label.Foreground = Get-ThemeBrush 'TextPrimary'
+    $box = New-Object System.Windows.Controls.PasswordBox; $box.FontSize = 14; $box.Padding = '8,6'; $box.MaxLength = 40
+    $buttons = New-Object System.Windows.Controls.StackPanel; $buttons.Orientation = 'Horizontal'; $buttons.HorizontalAlignment = 'Right'; $buttons.Margin = '0,16,0,0'
+    $ok = New-Object System.Windows.Controls.Button; $ok.Content = 'Save'; $ok.IsDefault = $true; $ok.MinWidth = 90; $ok.Margin = '0,0,10,0'; $ok.Padding = '14,5'
+    $cancel = New-Object System.Windows.Controls.Button; $cancel.Content = 'Cancel'; $cancel.IsCancel = $true; $cancel.MinWidth = 90; $cancel.Padding = '14,5'
+    $style = $global:MainWindow.TryFindResource('DialogPrimaryButton'); if ($style) { $ok.Style = $style }
+    $style = $global:MainWindow.TryFindResource('DialogSecondaryButton'); if ($style) { $cancel.Style = $style }
+    $global:SecretInputResult = ''
+    $ok.Add_Click({ $global:SecretInputResult = $box.Password; $dialog.Close() })
+    $cancel.Add_Click({ $global:SecretInputResult = ''; $dialog.Close() })
+    $null = $buttons.Children.Add($ok); $null = $buttons.Children.Add($cancel)
+    $null = $panel.Children.Add($label); $null = $panel.Children.Add($box); $null = $panel.Children.Add($buttons)
+    $dialog.Content = $panel
+    $dialog.Add_Loaded({ $null = $box.Focus() })
+    $null = $dialog.ShowDialog()
+    $value = [string]$global:SecretInputResult; $global:SecretInputResult = ''
+    Add-LogEntry -Text $(if ($value) { '> (hidden)' } else { '> (cancelled)' }) -Color '#A0A0B0'
+    return $value
+}
+
+# Every Games page button runs through here: its Tag says what to do and for which
+# game, client or mode. Same no-closure pattern as the other buttons.
+$global:GameActionMap = @{
+    'steam' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $url = if ($game.ProjectUrl) { $game.ProjectUrl } else { 'steam://store/' + @($game.SteamAppIds)[0] }
+        if (Test-SandboxMode) { Write-Host "[SANDBOX] Would open: $url" -ForegroundColor DarkYellow; return }
+        Start-Process $url; Write-Ok "Opened $url" }
+    'folder' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = "Select the $($game.Name) folder"; $dialog.ShowNewFolderButton = $false
+        $found = Find-CatalogGame -Game $game; if ($found) { $dialog.SelectedPath = $found.Folder }
+        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { Write-Info 'Folder selection cancelled.'; return }
+        if (-not (Test-CatalogGameFolder -Game $game -Folder $dialog.SelectedPath)) { throw "That folder does not contain $($game.Name): none of $($game.ValidFiles -join ', ') was found there." }
+        if (Save-CatalogGameFolder -Id $game.Id -Folder $dialog.SelectedPath) { Write-Ok "$($game.Name) folder saved: $($dialog.SelectedPath)" } }
+    'install' = { param($t) $null = Install-GameClient -GameId $t.Game -ClientId $t.Client }
+    'update' = { param($t) $null = Update-GameClient -GameId $t.Game -ClientId $t.Client; $global:GameUpdateCounts.Remove($t.Game + '|' + $t.Client) }
+    'remove' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $client = $game.Clients | Where-Object { $_.Id -eq $t.Client } | Select-Object -First 1
+        if ((Read-Host "Remove $($client.Name) from $($game.Name)? Its files are deleted and any game file it replaced is put back. [y/N]") -notmatch '^(y|yes)$') { Stop-Cancelled 'Nothing was removed.' }
+        Remove-GameClient -GameId $t.Game -ClientId $t.Client }
+    'play' = { param($t) $null = Start-CatalogGame -GameId $t.Game -ModeId $t.Mode }
+    'exe' = { param($t) $null = Test-GameExecutable -GameId $t.Game }
+    'plutologin' = { param($t) Start-PlutoniumLogin }
+    'cdkey' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $status = Get-GameCdKeyStatus -GameId $game.Id
+        Write-Info "$($game.Name) CD key: $(($status.Values | ForEach-Object { "$($_.Name) $($_.Masked)" }) -join ', ')"
+        if ($status.RetailKeyInHklm) { Write-Info 'The game''s own installer already stored a key; it is used as it is.' }
+        Write-Host '[1] Enter my CD key'
+        Write-Host '[2] Back up the current key'
+        Write-Host '[3] Restore a backup'
+        Write-Host '[0] Cancel'
+        switch (Read-Host 'What would you like to do?') {
+            '1' { $key = Read-SecretInput -Prompt "Your $($game.Name) CD key (20 letters and digits, as shown in Steam: right-click the game > Manage > CD Keys)."
+                  if (-not $key) { Stop-Cancelled 'No key was entered.' }
+                  Set-GameCdKey -GameId $game.Id -Key $key }
+            '2' { $null = Backup-GameCdKey -GameId $game.Id }
+            '3' { $backups = @(Get-GameCdKeyBackups -GameId $game.Id)
+                  if ($backups.Count -eq 0) { Write-Info 'There are no backups yet.'; return }
+                  for ($i = 0; $i -lt $backups.Count; $i++) { Write-Host "[$($i + 1)] $($backups[$i].Name)" }
+                  $choice = 0
+                  if (-not [int]::TryParse((Read-Host 'Which backup?'), [ref]$choice) -or $choice -lt 1 -or $choice -gt $backups.Count) { Stop-Cancelled 'Nothing was restored.' }
+                  Restore-GameCdKey -GameId $game.Id -BackupFile $backups[$choice - 1].FullName }
+            default { Stop-Cancelled 'Nothing was changed.' }
+        } }
+    'checkupdates' = { param($t)
+        $global:GameUpdateCounts = @{}
+        $checked = 0; $pending = 0
+        foreach ($game in Get-GameCatalog) {
+            $found = Find-CatalogGame -Game $game
+            if (-not $found) { continue }
+            foreach ($client in $game.Clients) {
+                if (-not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id)) { continue }
+                try {
+                    $count = Get-GameClientUpdateCount -Client $client -GameFolder $found.Folder
+                    $global:GameUpdateCounts[$game.Id + '|' + $client.Id] = $count
+                    $checked++; if ($count -gt 0) { $pending++ }
+                    Write-Info ("{0} - {1}: {2}" -f $game.Name, $client.Name, $(if ($count -gt 0) { "$count file(s) to update" } else { 'up to date' }))
+                } catch { Write-Warn "$($game.Name) - $($client.Name): could not check ($($_.Exception.Message))" }
+            }
+        }
+        if ($checked -eq 0) { Write-Info 'No installed clients to check.' } else { Write-Ok "Checked $checked client(s); $pending have updates." } }
+}
+
+# Builds one card per catalogue game from its current state.
+function Update-GamesPage {
+    $list = $global:MainWindow.FindName('GamesList')
+    if ($null -eq $list) { return }
+    $list.Children.Clear()
+    $cardStyle = $global:MainWindow.TryFindResource('Card')
+    $buttonStyle = $global:MainWindow.TryFindResource('SmallButton')
+    $text = { param([string]$Value, [string]$Color = 'TextSecondary', [double]$Size = 12.5, [string]$Weight = 'Normal')
+        $block = New-Object System.Windows.Controls.TextBlock
+        $block.Text = $Value; $block.FontSize = $Size; $block.TextWrapping = 'Wrap'; $block.FontWeight = $Weight
+        $block.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, $Color)
+        $block }
+    $button = { param([string]$Label, [hashtable]$Tag, [string]$Tip = '')
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $Label; $b.Tag = $Tag; $b.Margin = '0,8,8,0'
+        if ($buttonStyle) { $b.Style = $buttonStyle }
+        if ($Tip) { $b.ToolTip = $Tip }
+        $b.Add_Click({ param($sender, $e)
+            $tag = $sender.Tag
+            $action = $global:GameActionMap[[string]$tag.Action]
+            if ($null -eq $action) { return }
+            Run-Action -Action $action -Arguments @($tag)
+            Update-GamesPage })
+        $b }
+    foreach ($game in Get-GameCatalog) {
+        $found = $null
+        try { $found = Find-CatalogGame -Game $game } catch { $found = $null }
+        $card = New-Object System.Windows.Controls.Border
+        if ($cardStyle) { $card.Style = $cardStyle }
+        $card.Margin = '0,0,0,12'
+        $panel = New-Object System.Windows.Controls.StackPanel
+        $header = New-Object System.Windows.Controls.DockPanel
+        $state = 'Not found'; $stateColor = 'TextMuted'
+        if (-not $game.Available) { $state = 'Not available'; $stateColor = 'Yellow' }
+        if ($found) {
+            $installed = @($game.Clients | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_.Id })
+            $updates = @($game.Clients | Where-Object { [int]$global:GameUpdateCounts[$game.Id + '|' + $_.Id] -gt 0 })
+            if ($updates.Count -gt 0) { $state = 'Update available'; $stateColor = 'Accent' }
+            elseif ($installed.Count -gt 0) { $state = 'Client installed'; $stateColor = 'Green' }
+            elseif ($game.Available) { $state = 'Game found'; $stateColor = 'Green' }
+        }
+        $pill = & $text $state $stateColor 12 'SemiBold'
+        [System.Windows.Controls.DockPanel]::SetDock($pill, 'Right'); $pill.VerticalAlignment = 'Center'
+        $null = $header.Children.Add($pill)
+        $null = $header.Children.Add((& $text ("{0}  ({1})" -f $game.Name, $game.Year) 'TextPrimary' 16 'Bold'))
+        $null = $panel.Children.Add($header)
+        $where = if ($found) { "Folder: $($found.Folder)" } elseif ($game.Detect -eq 'folder') { 'Not on Steam: pick its folder with Change folder.' } else { 'Not found in your Steam libraries.' }
+        $line = & $text $where; $line.Margin = '0,4,0,0'; $null = $panel.Children.Add($line)
+        if ($found) {
+            foreach ($client in $game.Clients) {
+                $isIn = Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id
+                $count = $global:GameUpdateCounts[$game.Id + '|' + $client.Id]
+                $status = if (-not $isIn) { 'not installed' } elseif ($null -eq $count) { 'installed' } elseif ($count -gt 0) { "installed, $count file(s) to update" } else { 'installed, up to date' }
+                $line = & $text ("{0}: {1}" -f $client.Name, $status) $(if ($isIn) { 'Green' } else { 'TextMuted' }) 12; $line.Margin = '0,3,0,0'; $null = $panel.Children.Add($line)
+            }
+        }
+        if (-not $game.Available) { $line = & $text $game.UnavailableReason 'Yellow' 12; $line.Margin = '0,6,0,0'; $null = $panel.Children.Add($line) }
+        elseif ($game.Note) { $line = & $text $game.Note 'TextMuted' 12; $line.Margin = '0,6,0,0'; $null = $panel.Children.Add($line) }
+
+        $buttons = New-Object System.Windows.Controls.WrapPanel
+        if (-not $found -and ($game.ProjectUrl -or @($game.SteamAppIds).Count -gt 0)) {
+            $null = $buttons.Children.Add((& $button $(if ($game.ProjectUrl) { 'Open project' } else { 'Get on Steam' }) @{ Action = 'steam'; Game = $game.Id }))
+        } elseif ($game.ProjectUrl) { $null = $buttons.Children.Add((& $button 'Open project' @{ Action = 'steam'; Game = $game.Id })) }
+        $null = $buttons.Children.Add((& $button 'Change folder' @{ Action = 'folder'; Game = $game.Id } 'Pick the game folder yourself'))
+        if ($found -and $game.Available) {
+            foreach ($client in $game.Clients) {
+                if (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id) {
+                    $null = $buttons.Children.Add((& $button "Update $($client.Name)" @{ Action = 'update'; Game = $game.Id; Client = $client.Id }))
+                    $null = $buttons.Children.Add((& $button "Remove $($client.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $client.Id }))
+                } else {
+                    $null = $buttons.Children.Add((& $button "Install $($client.Name)" @{ Action = 'install'; Game = $game.Id; Client = $client.Id }))
+                }
+            }
+            if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
+            foreach ($mode in $game.Modes) { $null = $buttons.Children.Add((& $button "Play: $($mode.Label)" @{ Action = 'play'; Game = $game.Id; Mode = $mode.Id })) }
+        }
+        if ($found -and $game.ExeCheck) { $null = $buttons.Children.Add((& $button 'Check game exe' @{ Action = 'exe'; Game = $game.Id } "Check your own $($game.ExeCheck.File)")) }
+        if ($game.CdKey) { $null = $buttons.Children.Add((& $button 'CD key' @{ Action = 'cdkey'; Game = $game.Id } 'Your own CD key: view (masked), back up, set or restore')) }
+        $null = $panel.Children.Add($buttons)
+        $card.Child = $panel
+        $null = $list.Children.Add($card)
+    }
+}
+
+$window.FindName('PlayerNameBox').Text = [string](Get-AppSettings).PlayerName
+$window.FindName('BtnSavePlayerName').Add_Click({
+    $box = $global:MainWindow.FindName('PlayerNameBox')
+    $clean = Get-CleanPlayerName $box.Text
+    if (Save-PlayerName $clean) { $box.Text = $clean; Add-LogEntry -Text ('[OK]   Player name saved: ' + $(if ($clean) { $clean } else { '(none)' })) -Color '#4EC9B0' }
+})
+$window.FindName('BtnGamesRefresh').Add_Click({ Update-GamesPage; Add-LogEntry -Text '[OK]   Games list refreshed.' -Color '#4EC9B0' })
+$window.FindName('BtnGamesCheckUpdates').Add_Click({ Run-Action -Action $global:GameActionMap['checkupdates'] -Arguments @(@{}); Update-GamesPage })
+# The cards are built when the page is first opened, so detection does not slow startup.
+$window.FindName('NavGames').Add_Click({ if ($global:MainWindow.FindName('GamesList').Children.Count -eq 0) { Update-GamesPage } })
+
 # Makes it obvious that this window is the administrator worker, and what it is
 # busy with, instead of looking like an ordinary idle session.
 function Set-DowngradeRunChrome {
@@ -6416,6 +6646,9 @@ if ($RunDowngradeOnly) {
     }, [System.Windows.Threading.DispatcherPriority]::Background)
 } else {
     Show-Page -Index ([int]$startupSettings.LastPage) -Force
+    # Reopened on the Games page: build its cards now (they are otherwise built on the
+    # first click of the sidebar entry).
+    if ($global:CurrentPage -eq [array]::IndexOf($pages, 'PageGames')) { Update-GamesPage }
     Add-LogEntry -Text 'Ready. Choose an action from the sidebar to begin.' -Color '#606070'
 }
 
