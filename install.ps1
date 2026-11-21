@@ -2881,6 +2881,537 @@ function Find-CatalogGame {
 }
 
 # ==========================================
+# GAMES: CLIENT INSTALL, UPDATE AND REMOVAL
+# ==========================================
+# Every client install leaves a record in the game folder (.codhq-client-<id>.json)
+# listing each file it placed (with SHA-1 and SHA-256), every original game file it
+# had to replace (backed up under .codhq-backups\<id>), and every folder it created,
+# so Remove client puts the game back exactly. Files are downloaded and checked into a
+# staging folder first; only then is anything in the game written, and a failure while
+# writing undoes what was written.
+
+function Get-ClientRecordPath { param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId) Join-Path $GameFolder ('.codhq-client-' + $ClientId + '.json') }
+function Get-ClientBackupRoot { param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId) Join-Path $GameFolder ('.codhq-backups\' + $ClientId) }
+
+function Read-ClientRecord {
+    param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId)
+    $path = Get-ClientRecordPath -GameFolder $GameFolder -ClientId $ClientId
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try { return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json) }
+    catch { throw "The install record of $ClientId could not be read: $path ($($_.Exception.Message))." }
+}
+
+function Write-ClientRecord {
+    param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)]$Record)
+    $path = Get-ClientRecordPath -GameFolder $GameFolder -ClientId $ClientId
+    $temp = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temp, ($Record | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temp -Destination $path -Force -ErrorAction Stop
+    } catch { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue; throw }
+}
+
+# Every file the other installed clients of this game placed (full path -> owner).
+function Get-ClientFileOwners {
+    param([Parameter(Mandatory)][string]$GameFolder, [string]$ExceptClientId = '')
+    $owners = @{}
+    foreach ($recordFile in @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
+        $record = $null
+        try { $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json } catch { continue }
+        if ([string]$record.ClientId -eq $ExceptClientId) { continue }
+        foreach ($file in @($record.Files)) { $owners[([string]$file.Target).ToLowerInvariant()] = [pscustomobject]@{ ClientId = [string]$record.ClientId; Sha1 = [string]$file.Sha1 } }
+        foreach ($backup in @($record.Backups)) { $owners['backup:' + ([string]$backup.Target).ToLowerInvariant()] = [pscustomobject]@{ ClientId = [string]$record.ClientId; Backup = [string]$backup.Backup } }
+    }
+    return $owners
+}
+
+# Where one entry of a client goes: its own destination field, else the game folder for
+# clients without an AppData folder or for their listed game files, else AppData.
+function Resolve-ClientTarget {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$Path, [string]$Dest = '', [Parameter(Mandatory)][string]$GameFolder)
+    if (-not $Dest) {
+        if ([string]::IsNullOrEmpty($Client.AppData)) { $Dest = 'game' }
+        elseif (@($Client.GameFiles | Where-Object { $_ -ieq $Path }).Count -gt 0) { $Dest = 'game' }
+        else { $Dest = 'appdata' }
+    }
+    $root = if ($Dest -eq 'game') { $GameFolder } else { Join-Path (Get-ClientAppDataRoot) $Client.AppData }
+    $root = [IO.Path]::GetFullPath($root).TrimEnd('\')
+    $relative = Get-ValidatedRelativePath $Path
+    $full = [IO.Path]::GetFullPath((Join-Path $root $relative))
+    if (-not $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw "A client file would land outside its folder: $Path" }
+    return [pscustomobject]@{ Dest = $Dest; Root = $root; Target = $full; Relative = $relative }
+}
+
+function Get-FileSha1Hex { param([Parameter(Mandatory)][string]$Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToUpperInvariant() }
+
+# Works out what installing a client would do, without changing anything: which files
+# to download, which are already current, which of the game's own files are kept, which
+# names are made from the player's own files, and which manifest entries are skipped.
+function Get-ClientInstallPlan {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, $Manifest = $null)
+    $steps = [System.Collections.Generic.List[object]]::new()
+    $manifestHash = ''; $base = ''
+    if ($Client.Source -eq 'cb') {
+        if ($null -eq $Manifest) { $Manifest = Get-ClientManifest -Manifest $Client.Manifest }
+        $manifestHash = $Manifest.ManifestHash; $base = $Manifest.Base
+        $entries = @($Manifest.Entries | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = $_.Size; Sha1 = $_.Sha1; Sha256 = ''; Dest = $_.Dest; Url = '' } })
+    } else {
+        $entries = @($Client.Assets | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = [int64]$_.Size; Sha1 = ''; Sha256 = [string]$_.Sha256; Dest = 'game'; Url = [string]$_.Url } })
+    }
+    $previous = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
+    foreach ($entry in $entries) {
+        $verdict = if ($Client.Source -eq 'cb') { Get-ClientEntryVerdict -Client $Client -Path $entry.Path } else { 'allow' }
+        $target = Resolve-ClientTarget -Client $Client -Path $entry.Path -Dest $entry.Dest -GameFolder $GameFolder
+        $step = [pscustomobject]@{ Path = $entry.Path; Verdict = $verdict; Action = ''; Dest = $target.Dest; Root = $target.Root; Target = $target.Target; Relative = $target.Relative
+            Size = $entry.Size; Sha1 = $entry.Sha1; Sha256 = $entry.Sha256; Url = $entry.Url; DeriveFrom = '' }
+        switch ($verdict) {
+            'skip' { $step.Action = 'skip' }
+            'deny' { $step.Action = 'keep' }
+            'derive' {
+                $leaf = ($entry.Path -split '/')[-1]
+                $from = ''; foreach ($key in $Client.Derive.Keys) { if ($leaf -ieq $key) { $from = $Client.Derive[$key] } }
+                if ((Test-Path -LiteralPath $target.Target -PathType Leaf) -and (Get-FileSha1Hex $target.Target) -eq $entry.Sha1) { $step.Action = 'current'; break }
+                # The player's own original: this client's earlier backup of it, another
+                # client's backup of it, or the file in the game folder.
+                $candidates = [System.Collections.Generic.List[string]]::new()
+                $sourceTarget = (Resolve-ClientTarget -Client $Client -Path $from -Dest 'game' -GameFolder $GameFolder).Target
+                if ($previous) { foreach ($b in @($previous.Backups)) { if ([string]$b.Target -ieq $sourceTarget) { $candidates.Add([string]$b.Backup) } } }
+                foreach ($recordFile in @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
+                    try { foreach ($b in @((Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json).Backups)) { if ([string]$b.Target -ieq $sourceTarget) { $candidates.Add([string]$b.Backup) } } } catch { Write-Verbose "Unreadable record: $($recordFile.Name)" }
+                }
+                $candidates.Add($sourceTarget)
+                foreach ($candidate in $candidates) {
+                    if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and (Get-Item -LiteralPath $candidate).Length -eq $entry.Size -and (Get-FileSha1Hex $candidate) -eq $entry.Sha1) { $step.DeriveFrom = $candidate; break }
+                }
+                $step.Action = if ($step.DeriveFrom) { 'derive' } else { 'derive-missing' }
+                if (-not $step.DeriveFrom) { $step.DeriveFrom = $sourceTarget }
+            }
+            default {
+                $current = $false
+                if ((Test-Path -LiteralPath $target.Target -PathType Leaf) -and (Get-Item -LiteralPath $target.Target).Length -eq $entry.Size) {
+                    $current = if ($entry.Sha1) { (Get-FileSha1Hex $target.Target) -eq $entry.Sha1 } else { (Get-FileSha256 -Path $target.Target) -eq $entry.Sha256 }
+                }
+                $step.Action = if ($current) { 'current' } else { 'download' }
+                if ($Client.Source -eq 'cb') { $step.Url = $base + $Client.Folder + ((($entry.Path -split '/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/') + '?' + $entry.Sha1 }
+            }
+        }
+        $steps.Add($step)
+    }
+    return [pscustomobject]@{ Client = $Client; GameFolder = $GameFolder; ManifestHash = $manifestHash; Base = $base; Steps = $steps.ToArray(); Previous = $previous }
+}
+
+# Downloads one planned file into staging, trying the plan's source first and the
+# other CB sources after it.
+function Save-ClientFile {
+    param([Parameter(Mandatory)]$Step, [Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$StagePath, [int]$RetryDelaySeconds = 3)
+    $parent = Split-Path -Parent $StagePath
+    if (-not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+    $label = "Downloading $($Plan.Client.Name): $($Step.Path)"
+    if ($Plan.Client.Source -ne 'cb') {
+        $result = Invoke-ResumableDownload -Url $Step.Url -Destination $StagePath -Label $label -ExpectedSha256 $Step.Sha256 -RetryDelaySeconds $RetryDelaySeconds -PassThru
+        Write-Progress -Activity $label -Completed
+        return $result
+    }
+    $relativeUrl = $Plan.Client.Folder + ((($Step.Path -split '/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/') + '?' + $Step.Sha1
+    $bases = @($Plan.Base) + @(Get-ClientUpdateBases | Where-Object { $_ -ne $Plan.Base })
+    $lastError = $null
+    foreach ($base in $bases) {
+        try {
+            $result = Invoke-ResumableDownload -Url ($base + $relativeUrl) -Destination $StagePath -Label $label -ExpectedSha256 '' -ExpectedSha1 $Step.Sha1 -RetryDelaySeconds $RetryDelaySeconds -PassThru
+            Write-Progress -Activity $label -Completed
+            return $result
+        } catch {
+            $lastError = $_
+            if (Test-Path -LiteralPath $StagePath) { Remove-Item -LiteralPath $StagePath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    Write-Progress -Activity $label -Completed
+    throw "Could not download $($Step.Path) for $($Plan.Client.Name): $($lastError.Exception.Message)"
+}
+
+# Creates a folder and returns the folders it had to create (outermost first).
+function New-TrackedDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $walk = $Path
+    while ($walk -and -not (Test-Path -LiteralPath $walk)) { $missing.Insert(0, $walk); $walk = Split-Path -Parent $walk }
+    if ($missing.Count -gt 0) { $null = New-Item -ItemType Directory -Path $Path -Force }
+    return $missing.ToArray()
+}
+
+function Install-GameClient {
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3)
+    $game = Get-CatalogGame -Id $GameId
+    $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
+    if ($null -eq $client) { throw "$($game.Name) has no client '$ClientId'." }
+    if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
+    if (-not $GameFolder -or -not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
+    $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+
+    Write-Info "Checking what $($client.Name) needs in $GameFolder ..."
+    $plan = Get-ClientInstallPlan -Client $client -GameFolder $GameFolder -Manifest $Manifest
+    $missing = @($plan.Steps | Where-Object { $_.Action -eq 'derive-missing' })
+    if ($missing.Count -gt 0) {
+        $names = ($missing | ForEach-Object { (Split-Path -Leaf $_.DeriveFrom) + ' (for ' + $_.Path + ')' }) -join ', '
+        throw "$($client.Name) needs the game's original $names, but the file in your game folder is not the original build. Nothing was changed. Verify the game files in Steam, then try again."
+    }
+    # Two clients that put different versions of the same file in place cannot be
+    # installed together.
+    $owners = Get-ClientFileOwners -GameFolder $GameFolder -ExceptClientId $client.Id
+    foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) {
+        $owner = $owners[$step.Target.ToLowerInvariant()]
+        if ($owner -and $step.Sha1 -and $owner.Sha1 -and $owner.Sha1 -ne $step.Sha1) {
+            throw "$($client.Name) and $($owner.ClientId) both replace $($step.Path) with different files. Remove $($owner.ClientId) first; nothing was changed."
+        }
+    }
+
+    $downloads = @($plan.Steps | Where-Object { $_.Action -eq 'download' })
+    $stage = Join-Path $env:TEMP ('codhq-client-' + [guid]::NewGuid().ToString('N'))
+    $journal = [System.Collections.Generic.List[object]]::new()
+    $createdDirs = [System.Collections.Generic.List[string]]::new()
+    $backups = [System.Collections.Generic.List[object]]::new()
+    if ($plan.Previous) { foreach ($b in @($plan.Previous.Backups)) { $backups.Add([pscustomobject]@{ Target = [string]$b.Target; Backup = [string]$b.Backup }) } }
+    if ($plan.Previous) { foreach ($d in @($plan.Previous.CreatedDirs)) { $createdDirs.Add([string]$d) } }
+    $hashes = @{}
+    try {
+        $index = 0
+        foreach ($step in $downloads) {
+            $index++
+            Write-Info ("Downloading {0}/{1}: {2} ({3:N1} MB)" -f $index, $downloads.Count, $step.Path, ($step.Size / 1MB))
+            $result = Save-ClientFile -Step $step -Plan $plan -StagePath (Join-Path $stage ($step.Path -replace '/', '\')) -RetryDelaySeconds $RetryDelaySeconds
+            $hashes[$step.Target] = $result
+        }
+        if ($downloads.Count -gt 0) { Write-Ok "All $($downloads.Count) file(s) downloaded and checked." }
+
+        $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $client.Id
+        $previousTargets = @{}
+        if ($plan.Previous) { foreach ($f in @($plan.Previous.Files)) { $previousTargets[([string]$f.Target).ToLowerInvariant()] = $true } }
+        $writeSteps = @($plan.Steps | Where-Object { $_.Action -eq 'derive' }) + $downloads
+        try {
+            foreach ($step in $writeSteps) {
+                Test-SafeGameDestination -TargetRoot $step.Root -Destination $step.Target
+                foreach ($dir in (New-TrackedDirectory -Path (Split-Path -Parent $step.Target))) { $createdDirs.Add($dir) }
+                $backupPath = $null
+                $key = $step.Target.ToLowerInvariant()
+                # An existing file that no client placed is the player's own: keep a copy.
+                if ((Test-Path -LiteralPath $step.Target -PathType Leaf) -and -not $previousTargets.ContainsKey($key) -and -not $owners.ContainsKey($key) -and -not @($backups | Where-Object { $_.Target -ieq $step.Target }).Count) {
+                    $backupPath = Join-Path $backupRoot ($step.Dest + '\' + $step.Relative)
+                    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $backupPath) -Force
+                    Copy-Item -LiteralPath $step.Target -Destination $backupPath -Force -ErrorAction Stop
+                    $backups.Add([pscustomobject]@{ Target = $step.Target; Backup = $backupPath })
+                }
+                $source = if ($step.Action -eq 'derive') { $step.DeriveFrom } else { Join-Path $stage ($step.Path -replace '/', '\') }
+                $journal.Add([pscustomobject]@{ Target = $step.Target; Existed = (Test-Path -LiteralPath $step.Target -PathType Leaf); Backup = $backupPath })
+                Copy-FileAtomically -Source $source -Destination $step.Target
+            }
+        } catch {
+            Write-Warn "Installing $($client.Name) failed; putting back what was changed..."
+            for ($i = $journal.Count - 1; $i -ge 0; $i--) {
+                $change = $journal[$i]
+                try {
+                    if ($change.Backup -and (Test-Path -LiteralPath $change.Backup)) { Copy-FileAtomically -Source $change.Backup -Destination $change.Target; Remove-Item -LiteralPath $change.Backup -Force -ErrorAction SilentlyContinue }
+                    elseif (-not $change.Existed -and (Test-Path -LiteralPath $change.Target)) { Remove-Item -LiteralPath $change.Target -Force -ErrorAction Stop }
+                } catch { Write-Warn "Could not undo: $($change.Target)" }
+            }
+            throw
+        }
+
+        # Files the client no longer ships: put back the original if one was replaced,
+        # otherwise delete them (unless another client still uses them).
+        $keepTargets = @{}
+        foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) { $keepTargets[$step.Target.ToLowerInvariant()] = $true }
+        if ($plan.Previous) {
+            foreach ($old in @($plan.Previous.Files)) {
+                $oldTarget = [string]$old.Target
+                if ($keepTargets.ContainsKey($oldTarget.ToLowerInvariant()) -or $owners.ContainsKey($oldTarget.ToLowerInvariant())) { continue }
+                $backup = $backups | Where-Object { $_.Target -ieq $oldTarget } | Select-Object -First 1
+                if ($backup -and (Test-Path -LiteralPath $backup.Backup)) { Copy-FileAtomically -Source $backup.Backup -Destination $oldTarget; Remove-Item -LiteralPath $backup.Backup -Force; $null = $backups.Remove($backup) }
+                elseif (Test-Path -LiteralPath $oldTarget -PathType Leaf) { Remove-Item -LiteralPath $oldTarget -Force -ErrorAction Stop }
+                Write-Info "Removed a file $($client.Name) no longer ships: $($old.Path)"
+            }
+        }
+
+        $files = foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) {
+            $sha256 = if ($hashes.ContainsKey($step.Target)) { $hashes[$step.Target].Sha256 } else { Get-FileSha256 -Path $step.Target }
+            $sha1 = if ($step.Sha1) { $step.Sha1 } else { Get-FileSha1Hex $step.Target }
+            [pscustomobject]@{ Path = $step.Path; Dest = $step.Dest; Target = $step.Target; Size = $step.Size; Sha1 = $sha1; Sha256 = $sha256; Derived = ($step.Action -eq 'derive') }
+        }
+        # The game's own files the client was built against (for the build check before Play).
+        $expected = foreach ($step in @($plan.Steps | Where-Object { $_.Action -eq 'keep' })) { [pscustomobject]@{ Path = $step.Path; Target = $step.Target; Size = $step.Size; Sha1 = $step.Sha1 } }
+        Write-ClientRecord -GameFolder $GameFolder -ClientId $client.Id -Record ([pscustomobject]@{
+            Version = 1; GameId = $game.Id; ClientId = $client.Id; ClientName = $client.Name; Source = $client.Source; Manifest = $client.Manifest
+            ManifestHash = $plan.ManifestHash; InstalledAt = [DateTime]::UtcNow.ToString('o'); GameFolder = $GameFolder
+            Files = @($files); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs | Select-Object -Unique); ExpectedGameFiles = @($expected) })
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    $count = { param($action) @($plan.Steps | Where-Object { $_.Action -eq $action }).Count }
+    Write-Ok "$($client.Name) is installed for $($game.Name)."
+    Write-Info ("Downloaded: {0}. Already current: {1}. Made from your own files: {2}. Your own game files kept: {3}. Skipped (not audited): {4}." -f (& $count 'download'), (& $count 'current'), (& $count 'derive'), (& $count 'keep'), (& $count 'skip'))
+    foreach ($skipped in @($plan.Steps | Where-Object { $_.Action -eq 'skip' } | Select-Object -First 5)) { Write-Host "  skipped: $($skipped.Path)" -ForegroundColor DarkGray }
+    if ($client.Id -eq 'plutonium') { Complete-PlutoniumSetup -Game $game -GameFolder $GameFolder }
+    return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = (& $count 'download'); Current = (& $count 'current'); Derived = (& $count 'derive'); Kept = (& $count 'keep'); Skipped = (& $count 'skip') }
+}
+
+# Same as installing: only changed files are downloaded, removed ones are cleaned up.
+function Update-GameClient {
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3)
+    $result = Install-GameClient -GameId $GameId -ClientId $ClientId -GameFolder $GameFolder -Manifest $Manifest -RetryDelaySeconds $RetryDelaySeconds
+    if ($result.Downloaded -eq 0) { Write-Ok 'Already up to date.' }
+    return $result
+}
+
+function Test-GameClientInstalled {
+    param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId)
+    $record = $null
+    try { $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $ClientId } catch { return $false }
+    if ($null -eq $record) { return $false }
+    foreach ($file in @($record.Files)) { if (-not (Test-Path -LiteralPath ([string]$file.Target) -PathType Leaf)) { return $false } }
+    return $true
+}
+
+# How many files an update would download (needs the network). 0 means up to date.
+function Get-GameClientUpdateCount {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder)
+    $plan = Get-ClientInstallPlan -Client $Client -GameFolder $GameFolder
+    return @($plan.Steps | Where-Object { $_.Action -eq 'download' }).Count
+}
+
+function Remove-GameClient {
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '')
+    $game = Get-CatalogGame -Id $GameId
+    if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
+    if (-not $GameFolder) { throw "$($game.Name) was not found." }
+    $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $ClientId
+    if ($null -eq $record) { Write-Info "$ClientId is not installed in $GameFolder."; return }
+    $owners = Get-ClientFileOwners -GameFolder $GameFolder -ExceptClientId $ClientId
+    $removed = 0; $restored = 0; $shared = 0
+    foreach ($file in @($record.Files)) {
+        $target = [string]$file.Target
+        if ($owners.ContainsKey($target.ToLowerInvariant())) { $shared++; continue }
+        if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force -ErrorAction Stop; $removed++ }
+    }
+    foreach ($backup in @($record.Backups)) {
+        if ($owners.ContainsKey(([string]$backup.Target).ToLowerInvariant())) { continue }
+        if (Test-Path -LiteralPath ([string]$backup.Backup) -PathType Leaf) { Copy-FileAtomically -Source ([string]$backup.Backup) -Destination ([string]$backup.Target); $restored++ }
+    }
+    foreach ($dir in @(@($record.CreatedDirs) | Sort-Object { ([string]$_).Length } -Descending)) {
+        $dir = [string]$dir
+        if ((Test-Path -LiteralPath $dir -PathType Container) -and -not (Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue }
+    }
+    $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $ClientId
+    if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    $backupsBase = Join-Path $GameFolder '.codhq-backups'
+    if ((Test-Path -LiteralPath $backupsBase) -and -not (Get-ChildItem -LiteralPath $backupsBase -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $backupsBase -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath (Get-ClientRecordPath -GameFolder $GameFolder -ClientId $ClientId) -Force -ErrorAction Stop
+    Write-Ok "$($record.ClientName) was removed from $($game.Name)."
+    Write-Info "Removed files: $removed. Original game files put back: $restored. Kept because another client uses them: $shared."
+}
+
+# ==========================================
+# GAMES: PLUTONIUM
+# ==========================================
+function Get-PlutoniumRoot { Join-Path (Get-ClientAppDataRoot) 'Plutonium' }
+
+function Get-PlutoniumRemoteRevision {
+    $prod = Invoke-RestMethod -Uri 'https://cdn.plutonium.pw/updater/prod.json' -Headers @{ 'User-Agent' = 'CallOfDutyHQ-SetupUtility/1.1' } -TimeoutSec 30
+    $infoUrl = [string]@($prod.manifests)[0]
+    if (-not $infoUrl) { throw 'Plutonium''s prod.json lists no manifest.' }
+    $info = Invoke-RestMethod -Uri $infoUrl -Headers @{ 'User-Agent' = 'CallOfDutyHQ-SetupUtility/1.1' } -TimeoutSec 30
+    return [int]$info.revision
+}
+
+function Get-PlutoniumLocalRevision {
+    $info = Join-Path (Get-PlutoniumRoot) 'info.json'
+    if (-not (Test-Path -LiteralPath $info -PathType Leaf)) { return $null }
+    try { return [int](Get-Content -LiteralPath $info -Raw | ConvertFrom-Json).revision } catch { return $null }
+}
+
+# Writes one game path into Plutonium's config.json the way the CB launcher does: all
+# required fields present, written through a temp file, and a file that cannot be
+# read or parsed is left alone (it holds the login token).
+function Set-PlutoniumGamePath {
+    param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Path)
+    $root = Get-PlutoniumRoot
+    if (-not (Test-Path -LiteralPath $root)) { $null = New-Item -ItemType Directory -Path $root -Force }
+    $config = Join-Path $root 'config.json'
+    $data = [ordered]@{}
+    if (Test-Path -LiteralPath $config -PathType Leaf) {
+        try { $existing = Get-Content -LiteralPath $config -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { Write-Warn "Plutonium's config.json could not be read; it was left alone."; return $false }
+        if ($existing -isnot [pscustomobject]) { Write-Warn "Plutonium's config.json is not an object; it was left alone."; return $false }
+        foreach ($property in $existing.PSObject.Properties) { $data[$property.Name] = $property.Value }
+    }
+    foreach ($field in 'iw5Path', 't4Path', 't5Path', 't6Path', 'token') { if (-not $data.Contains($field)) { $data[$field] = '' } }
+    if ([string]$data[$Key] -eq $Path) { return $true }
+    $data[$Key] = $Path
+    $temp = Join-Path $root 'config.json.tmp'
+    try {
+        [IO.File]::WriteAllText($temp, ([pscustomobject]$data | ConvertTo-Json -Depth 6 -Compress), [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temp -Destination $config -Force -ErrorAction Stop
+    } catch { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue; throw }
+    return $true
+}
+
+# Brings Plutonium up to date with the bootstrapper in the game folder, like the CB
+# launcher: only when the published revision differs from the installed one; the
+# updater's window stays open when it is done, so the new revision appearing is what
+# marks completion.
+function Update-Plutonium {
+    param([Parameter(Mandatory)][string]$GameFolder, [int]$TimeoutSeconds = 900)
+    $bootstrapper = Join-Path $GameFolder 'plutonium.exe'
+    if (-not (Test-Path -LiteralPath $bootstrapper -PathType Leaf)) { throw 'plutonium.exe is missing from the game folder; install the Plutonium client first.' }
+    $remote = $null
+    try { $remote = Get-PlutoniumRemoteRevision } catch { Write-Warn "Could not read Plutonium's published revision ($($_.Exception.Message)); assuming it is current." ; return }
+    $local = Get-PlutoniumLocalRevision
+    if ($null -ne $local -and $local -eq $remote) { Write-Ok "Plutonium is up to date (revision $remote)."; return }
+    if (Test-SandboxMode) { Write-Host "[SANDBOX] Plutonium would be updated to revision $remote here; skipped in sandbox mode." -ForegroundColor DarkYellow; return }
+    Write-Info "Updating Plutonium from revision $(if ($null -ne $local) { $local } else { 'none' }) to $remote ..."
+    $process = Start-Process -FilePath $bootstrapper -ArgumentList '-update-only -no-self-update' -WorkingDirectory $GameFolder -PassThru
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Seconds 2
+        Invoke-UiPump
+        if ((Get-PlutoniumLocalRevision) -eq $remote) {
+            if (-not $process.HasExited) { try { $process.Kill() } catch { Write-Verbose 'The Plutonium updater had already closed.' } }
+            Write-Ok "Plutonium updated to revision $remote."
+            return
+        }
+        if ($process.HasExited -and (Get-PlutoniumLocalRevision) -ne $remote) { break }
+    }
+    Write-Warn 'The Plutonium updater did not finish. Start it again with Update, or run plutonium.exe from the game folder.'
+}
+
+function Complete-PlutoniumSetup {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$GameFolder)
+    if ($Game.PlutoniumKey) { if (Set-PlutoniumGamePath -Key $Game.PlutoniumKey -Path $GameFolder) { Write-Ok "Plutonium knows where $($Game.Name) is." } }
+    Update-Plutonium -GameFolder $GameFolder
+    Write-Info 'Plutonium needs a free account: use Plutonium login to sign in once.'
+}
+
+# Opens Plutonium's own window (no arguments), where the player signs in.
+function Start-PlutoniumLogin {
+    $launcher = Join-Path (Get-PlutoniumRoot) 'bin\plutonium-launcher-win32.exe'
+    if (Test-SandboxMode) { Write-Host "[SANDBOX] Would open Plutonium's login: $launcher" -ForegroundColor DarkYellow; return }
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Plutonium is not installed yet. Install the Plutonium client for one of its games first.' }
+    Start-Process -FilePath $launcher -WorkingDirectory (Get-PlutoniumRoot)
+    Write-Ok 'Plutonium opened. Sign in there; the login is remembered.'
+}
+
+# ==========================================
+# GAMES: LAUNCH
+# ==========================================
+# The player name, as the clients accept it: printable characters, at most 16.
+function Get-CleanPlayerName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
+    $clean = ($Name -replace '[^\w \-\.\[\]\(\)]', '').Trim()
+    if ($clean.Length -gt 16) { $clean = $clean.Substring(0, 16) }
+    return $clean
+}
+
+function Save-PlayerName {
+    param([string]$Name)
+    $settings = Get-AppSettings
+    $settings.PlayerName = Get-CleanPlayerName $Name
+    return (Save-AppSettings -Settings $settings)
+}
+
+# The main executable's version and size, and whether the game files a client was
+# built against still match (shown before every Play).
+function Get-GameBuildInfo {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$GameFolder)
+    $exe = $Game.ValidFiles | Where-Object { $_ -like '*.exe' -and (Test-Path -LiteralPath (Join-Path $GameFolder $_) -PathType Leaf) } | Select-Object -First 1
+    $info = [pscustomobject]@{ Executable = $exe; Version = ''; Size = 0; Mismatches = @() }
+    if ($exe) {
+        $path = Join-Path $GameFolder $exe
+        $info.Version = [string]([Diagnostics.FileVersionInfo]::GetVersionInfo($path).FileVersion)
+        $info.Size = (Get-Item -LiteralPath $path).Length
+    }
+    $mismatches = [System.Collections.Generic.List[object]]::new()
+    foreach ($recordFile in @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
+        $record = $null
+        try { $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json } catch { continue }
+        foreach ($expected in @($record.ExpectedGameFiles)) {
+            $target = [string]$expected.Target
+            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { $mismatches.Add([pscustomobject]@{ Client = [string]$record.ClientName; Path = [string]$expected.Path; Found = 'missing'; Expected = [string]$expected.Sha1 }); continue }
+            if ((Get-Item -LiteralPath $target).Length -ne [int64]$expected.Size -or (Get-FileSha1Hex $target) -ne [string]$expected.Sha1) {
+                $mismatches.Add([pscustomobject]@{ Client = [string]$record.ClientName; Path = [string]$expected.Path; Found = (Get-FileSha1Hex $target); Expected = [string]$expected.Sha1 })
+            }
+        }
+    }
+    $info.Mismatches = $mismatches.ToArray()
+    return $info
+}
+
+# CB adds this compatibility flag for the oldest games so they scale correctly.
+function Set-DpiAwareFlag {
+    param([Parameter(Mandatory)][string]$Executable)
+    if (Test-SandboxMode) { return }
+    $key = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+    if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key -Force }
+    $current = [string](Get-ItemProperty -LiteralPath $key -Name $Executable -ErrorAction SilentlyContinue).$Executable
+    if ($current -split ' ' -contains 'HIGHDPIAWARE') { return }
+    $value = if ([string]::IsNullOrWhiteSpace($current)) { '~ HIGHDPIAWARE' } else { $current.Trim() + ' HIGHDPIAWARE' }
+    New-ItemProperty -LiteralPath $key -Name $Executable -Value $value -PropertyType String -Force | Out-Null
+}
+
+# Builds the exact command for a game and mode (from the CB launcher's configuration).
+function Get-CatalogLaunchCommand {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Mode, [Parameter(Mandatory)][string]$GameFolder, [string]$PlayerName = '')
+    if ($Mode.Kind -eq 'plutonium') {
+        return [pscustomobject]@{ FilePath = (Join-Path (Get-PlutoniumRoot) 'bin\plutonium-launcher-win32.exe'); Arguments = 'plutonium://play/' + $Mode.Uri; WorkingDirectory = (Get-PlutoniumRoot); Elevate = $false }
+    }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($Game.DefaultArguments) { $parts.Add($Game.DefaultArguments) }
+    if ($Mode.Arguments) { $parts.Add($Mode.Arguments) }
+    $name = Get-CleanPlayerName $PlayerName
+    if ($name -and $Mode.UseName -and $Game.NameArgument) { $parts.Add($Game.NameArgument + ' "' + $name + '"') }
+    return [pscustomobject]@{ FilePath = (Join-Path $GameFolder $Mode.Exe); Arguments = ($parts -join ' '); WorkingDirectory = $GameFolder; Elevate = [bool]$Game.NeedsElevation }
+}
+
+function Start-CatalogGame {
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ModeId, [string]$GameFolder = '')
+    $game = Get-CatalogGame -Id $GameId
+    $mode = $game.Modes | Where-Object { $_.Id -eq $ModeId } | Select-Object -First 1
+    if ($null -eq $mode) { throw "$($game.Name) has no mode '$ModeId'." }
+    if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
+    if (-not $GameFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
+    if (@($mode.Clients).Count -gt 0) {
+        $installed = @($mode.Clients | Where-Object { Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_ })
+        if ($installed.Count -eq 0) {
+            $names = ($mode.Clients | ForEach-Object { $id = $_; ($game.Clients | Where-Object { $_.Id -eq $id }).Name }) -join ' or '
+            throw "$($mode.Label) needs $names. Use Install client first."
+        }
+    }
+    $build = Get-GameBuildInfo -Game $game -GameFolder $GameFolder
+    if ($build.Executable) { Write-Info ("Game build: {0} version {1}, {2:N0} bytes." -f $build.Executable, $(if ($build.Version) { $build.Version } else { 'unknown' }), $build.Size) }
+    foreach ($m in $build.Mismatches) {
+        Write-Warn "$($m.Client) was installed against a different $($m.Path) (expected SHA-1 $($m.Expected), found $($m.Found)). If the game does not start, verify the game files in Steam."
+    }
+    if ($mode.Kind -eq 'plutonium') {
+        if ($game.PlutoniumKey) { $null = Set-PlutoniumGamePath -Key $game.PlutoniumKey -Path $GameFolder }
+        Update-Plutonium -GameFolder $GameFolder
+    }
+    foreach ($exe in @($game.DpiFix)) { try { Set-DpiAwareFlag -Executable (Join-Path $GameFolder $exe) } catch { Write-Verbose 'DPI flag not set.' } }
+    $command = Get-CatalogLaunchCommand -Game $game -Mode $mode -GameFolder $GameFolder -PlayerName ([string](Get-AppSettings).PlayerName)
+    if (Test-SandboxMode) {
+        Write-Host ("[SANDBOX] Would start: `"{0}`" {1}" -f $command.FilePath, $command.Arguments) -ForegroundColor DarkYellow
+        return $command
+    }
+    if (-not (Test-Path -LiteralPath $command.FilePath -PathType Leaf)) { throw "Not found: $($command.FilePath). Install or update the client first." }
+    Write-Info ("Starting {0} - {1}: `"{2}`" {3}" -f $game.Name, $mode.Label, $command.FilePath, $command.Arguments)
+    $startArgs = @{ FilePath = $command.FilePath; WorkingDirectory = $command.WorkingDirectory }
+    if ($command.Arguments) { $startArgs.ArgumentList = $command.Arguments }
+    if ($command.Elevate) { $startArgs.Verb = 'RunAs' }
+    Start-Process @startArgs
+    Write-Ok "$($game.Name) started."
+    return $command
+}
+
+# ==========================================
 # WPF GUI DEFINITION (Ultimate Cool Design)
 # ==========================================
 [xml]$xaml = @"

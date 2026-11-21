@@ -86,6 +86,42 @@ BeforeAll {
         try { [void]$Server.Shell.EndInvoke($Server.Handle) } catch { }
         $Server.Shell.Dispose()
     }
+    # Serves several files by URL path (the query string is ignored), 404 for anything
+    # else; $Files maps '/folder/name' to bytes. Requested paths are counted.
+    function Start-TestFileServer {
+        param([hashtable]$Files)
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $state = [hashtable]::Synchronized(@{ Requests = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new()) })
+        $shell = [powershell]::Create()
+        [void]$shell.AddScript({
+            param($listener, $files, $state)
+            while ($true) {
+                try { $client = $listener.AcceptTcpClient() } catch { break }
+                try {
+                    $stream = $client.GetStream()
+                    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+                    $first = $reader.ReadLine(); $line = $first
+                    while ($line) { $line = $reader.ReadLine() }
+                    $path = [Uri]::UnescapeDataString((($first -split ' ')[1] -split '\?')[0])
+                    [void]$state.Requests.Add($path)
+                    if ($files.ContainsKey($path)) {
+                        $body = [byte[]]$files[$path]
+                        $header = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: $($body.Length)`r`nContent-Type: application/octet-stream`r`nConnection: close`r`n`r`n")
+                        $stream.Write($header, 0, $header.Length); $stream.Write($body, 0, $body.Length)
+                    } else {
+                        $header = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+                        $stream.Write($header, 0, $header.Length)
+                    }
+                    $stream.Flush()
+                } catch { } finally { $client.Close() }
+            }
+        }).AddArgument($listener).AddArgument($Files).AddArgument($state)
+        $handle = $shell.BeginInvoke()
+        [pscustomobject]@{ Base = "http://127.0.0.1:$($listener.LocalEndpoint.Port)/"; Listener = $listener; Shell = $shell; Handle = $handle; State = $state }
+    }
+    function Get-BytesSha1 { param([byte[]]$Bytes) $sha = [Security.Cryptography.SHA1]::Create(); try { ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('X2') }) -join '' } finally { $sha.Dispose() } }
+
     function Get-BytesSha256 { param([byte[]]$Bytes) $sha = [Security.Cryptography.SHA256]::Create(); try { ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') }) -join '' } finally { $sha.Dispose() } }
 
     # Prompts are answered from this queue, in order.
@@ -1273,6 +1309,225 @@ Describe 'Client manifests' {
             $server = Start-TestHttpServer -Content ([Text.Encoding]::ASCII.GetBytes($json)); $servers.Add($server)
             { Get-ClientManifest -Manifest 'x.json' -Bases @(($server.Url -replace 'asset\.bin$', '')) } | Should -Throw '*Could not read the client manifest*'
         }
+    }
+}
+
+Describe 'Game clients: install, update, remove' {
+    BeforeAll {
+        $served = [hashtable]::Synchronized(@{})
+        $fileServer = Start-TestFileServer -Files $served
+        # A manifest object as Get-ClientManifest returns it; the files are put on the
+        # local server under the client's folder.
+        function New-FakeManifest {
+            param($Client, [System.Collections.IDictionary]$Files)
+            $entries = foreach ($path in $Files.Keys) {
+                $spec = $Files[$path]
+                $bytes = if ($spec -is [hashtable]) { [Text.Encoding]::ASCII.GetBytes([string]$spec.Text) } else { [Text.Encoding]::ASCII.GetBytes([string]$spec) }
+                $dest = if ($spec -is [hashtable] -and $spec.Dest) { $spec.Dest } else { '' }
+                if (-not ($spec -is [hashtable] -and $spec.NotServed)) { $served['/' + $Client.Folder + $path] = $bytes }
+                $sha1 = if ($spec -is [hashtable] -and $spec.Sha1) { $spec.Sha1 } else { Get-BytesSha1 $bytes }
+                [pscustomobject]@{ Path = $path; Size = [int64]$bytes.Length; Sha1 = $sha1; Dest = $dest }
+            }
+            [pscustomobject]@{ Name = $Client.Manifest; Base = $fileServer.Base; Entries = @($entries); ManifestHash = ('A' * 64) }
+        }
+    }
+    AfterAll { Stop-TestHttpServer $fileServer }
+
+    BeforeEach {
+        $served.Clear()
+        $appData = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('appdata-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $ghostsFolder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('ghosts-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $ghostsFolder 'iw6mp64_ship.exe') -Value 'retail'
+        $ghosts = Get-CatalogGame -Id 'ghosts'; $iw6x = $ghosts.Clients[0]
+        Mock Get-ClientAppDataRoot { $appData }
+        Mock Write-Host { }
+        Mock Write-Progress { }
+    }
+
+    It 'installs only the audited files and records every one with its hashes' {
+        $manifest = New-FakeManifest -Client $iw6x -Files ([ordered]@{ 'iw6x.exe' = 'client exe'; 'data/scripts/a.gsc' = 'script'; 'surprise.exe' = 'not audited' })
+        $result = Install-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder -Manifest $manifest -RetryDelaySeconds 0
+        Get-Text (Join-Path $ghostsFolder 'iw6x.exe') | Should -Be 'client exe'
+        Get-Text (Join-Path $ghostsFolder 'data\scripts\a.gsc') | Should -Be 'script'
+        Test-Path -LiteralPath (Join-Path $ghostsFolder 'surprise.exe') | Should -BeFalse
+        $result.Downloaded | Should -Be 2
+        $result.Skipped | Should -Be 1
+        $record = Read-ClientRecord -GameFolder $ghostsFolder -ClientId 'iw6x'
+        @($record.Files).Count | Should -Be 2
+        foreach ($file in $record.Files) { $file.Sha256 | Should -Match '^[0-9a-f]{64}$'; $file.Sha1 | Should -Match '^[0-9A-F]{40}$' }
+        Test-GameClientInstalled -GameFolder $ghostsFolder -ClientId 'iw6x' | Should -BeTrue
+    }
+
+    It 'updates by downloading only what changed and removing what the client dropped' {
+        $manifest = New-FakeManifest -Client $iw6x -Files ([ordered]@{ 'iw6x.exe' = 'v1'; 'data/old.gsc' = 'old'; 'data/keep.gsc' = 'keep' })
+        $null = Install-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder -Manifest $manifest -RetryDelaySeconds 0
+        $same = Update-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder -Manifest $manifest -RetryDelaySeconds 0
+        $same.Downloaded | Should -Be 0
+        $served.Clear(); $fileServer.State.Requests.Clear()
+        $manifest2 = New-FakeManifest -Client $iw6x -Files ([ordered]@{ 'iw6x.exe' = 'v2'; 'data/keep.gsc' = 'keep' })
+        $updated = Update-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder -Manifest $manifest2 -RetryDelaySeconds 0
+        $updated.Downloaded | Should -Be 1
+        @($fileServer.State.Requests) | Should -Be @('/iw6x/iw6x.exe')
+        Get-Text (Join-Path $ghostsFolder 'iw6x.exe') | Should -Be 'v2'
+        Test-Path -LiteralPath (Join-Path $ghostsFolder 'data\old.gsc') | Should -BeFalse
+    }
+
+    It 'removes a client completely, including the folders it created' {
+        $manifest = New-FakeManifest -Client $iw6x -Files ([ordered]@{ 'iw6x.exe' = 'client'; 'data/deep/x.gsc' = 'x' })
+        $null = Install-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder -Manifest $manifest -RetryDelaySeconds 0
+        Remove-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder
+        Test-Path -LiteralPath (Join-Path $ghostsFolder 'iw6x.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $ghostsFolder 'data') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $ghostsFolder -ClientId 'iw6x') | Should -BeFalse
+        Get-Text (Join-Path $ghostsFolder 'iw6mp64_ship.exe') | Should -Be 'retail'
+    }
+
+    It 'never downloads a denied file, keeps the player''s own and remembers its build' {
+        $mw2Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('mw2-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $mw2Folder 'iw4mp.exe') -Value 'retail'
+        [IO.File]::WriteAllText((Join-Path $mw2Folder 'binkw32.dll'), 'players bink')
+        $iw4x = (Get-CatalogGame -Id 'mw2').Clients[0]
+        $manifest = New-FakeManifest -Client $iw4x -Files ([ordered]@{ 'iw4x.exe' = 'client'; 'binkw32.dll' = @{ Text = 'cb copy of bink'; NotServed = $true } })
+        $result = Install-GameClient -GameId 'mw2' -ClientId 'iw4x' -GameFolder $mw2Folder -Manifest $manifest -RetryDelaySeconds 0
+        $result.Kept | Should -Be 1
+        Get-Text (Join-Path $mw2Folder 'binkw32.dll') | Should -Be 'players bink'
+        @($fileServer.State.Requests | Where-Object { $_ -like '*binkw32*' }).Count | Should -Be 0
+        $info = Get-GameBuildInfo -Game (Get-CatalogGame -Id 'mw2') -GameFolder $mw2Folder
+        @($info.Mismatches).Count | Should -Be 1
+        $info.Mismatches[0].Path | Should -Be 'binkw32.dll'
+    }
+
+    It 'makes a renamed original from the player''s own file, backs up what it replaces and restores it on removal' {
+        $cod2Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod2-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $cod2Folder 'CoD2MP_s.exe') -Value 'retail'
+        [IO.File]::WriteAllText((Join-Path $cod2Folder 'mss32.dll'), 'original miles')
+        $cod2x = (Get-CatalogGame -Id 'cod2').Clients[0]
+        $manifest = New-FakeManifest -Client $cod2x -Files ([ordered]@{ 'mss32.dll' = 'cod2x proxy'; 'mss32_original.dll' = @{ Text = 'original miles'; NotServed = $true } })
+        $result = Install-GameClient -GameId 'cod2' -ClientId 'cod2x' -GameFolder $cod2Folder -Manifest $manifest -RetryDelaySeconds 0
+        $result.Derived | Should -Be 1
+        Get-Text (Join-Path $cod2Folder 'mss32_original.dll') | Should -Be 'original miles'
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'cod2x proxy'
+        # Installing again finds the original in the backup, although mss32.dll is now the proxy.
+        $again = Install-GameClient -GameId 'cod2' -ClientId 'cod2x' -GameFolder $cod2Folder -Manifest $manifest -RetryDelaySeconds 0
+        $again.Downloaded | Should -Be 0
+        Remove-GameClient -GameId 'cod2' -ClientId 'cod2x' -GameFolder $cod2Folder
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'original miles'
+        Test-Path -LiteralPath (Join-Path $cod2Folder 'mss32_original.dll') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod2Folder '.codhq-backups') | Should -BeFalse
+    }
+
+    It 'changes nothing when the player''s file is not the original the client needs' {
+        $cod2Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod2-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $cod2Folder 'CoD2MP_s.exe') -Value 'retail'
+        [IO.File]::WriteAllText((Join-Path $cod2Folder 'mss32.dll'), 'some other build')
+        $cod2x = (Get-CatalogGame -Id 'cod2').Clients[0]
+        $manifest = New-FakeManifest -Client $cod2x -Files ([ordered]@{ 'mss32.dll' = 'cod2x proxy'; 'mss32_original.dll' = @{ Text = 'original miles'; NotServed = $true } })
+        { Install-GameClient -GameId 'cod2' -ClientId 'cod2x' -GameFolder $cod2Folder -Manifest $manifest -RetryDelaySeconds 0 } | Should -Throw '*not the original build*'
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'some other build'
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod2Folder -ClientId 'cod2x') | Should -BeFalse
+    }
+
+    It 'refuses a second client that replaces the same file differently' {
+        $cod4Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod4-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $cod4Folder 'iw3mp.exe') -Value 'retail'
+        $cod4 = Get-CatalogGame -Id 'cod4'
+        $cod4x = $cod4.Clients | Where-Object Id -eq 'cod4x'; $iw3x = $cod4.Clients | Where-Object Id -eq 'iw3x'
+        $null = Install-GameClient -GameId 'cod4' -ClientId 'cod4x' -GameFolder $cod4Folder -Manifest (New-FakeManifest -Client $cod4x -Files ([ordered]@{ 'mss32.dll' = @{ Text = 'cod4x proxy'; Dest = 'game' } })) -RetryDelaySeconds 0
+        { Install-GameClient -GameId 'cod4' -ClientId 'iw3x' -GameFolder $cod4Folder -Manifest (New-FakeManifest -Client $iw3x -Files ([ordered]@{ 'mss32.dll' = @{ Text = 'iw3x proxy'; Dest = 'game' } })) -RetryDelaySeconds 0 } | Should -Throw '*Remove cod4x first*'
+        Get-Text (Join-Path $cod4Folder 'mss32.dll') | Should -Be 'cod4x proxy'
+    }
+
+    It 'puts everything back when writing fails half way' {
+        $manifest = New-FakeManifest -Client $iw6x -Files ([ordered]@{ 'data/a.gsc' = 'a'; 'iw6x.exe' = 'client' })
+        Set-Content -LiteralPath (Join-Path $ghostsFolder 'iw6x.exe') -Value 'locked old'
+        $handle = [IO.File]::Open((Join-Path $ghostsFolder 'iw6x.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try { { Install-GameClient -GameId 'ghosts' -ClientId 'iw6x' -GameFolder $ghostsFolder -Manifest $manifest -RetryDelaySeconds 0 } | Should -Throw }
+        finally { $handle.Dispose() }
+        Test-Path -LiteralPath (Join-Path $ghostsFolder 'data\a.gsc') | Should -BeFalse
+        Get-Text (Join-Path $ghostsFolder 'iw6x.exe') | Should -Be 'locked old'
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $ghostsFolder -ClientId 'iw6x') | Should -BeFalse
+    }
+
+    It 'puts AppData files under the client''s own AppData folder' {
+        $mwrFolder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('mwr-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $mwrFolder 'h1_mp64_ship.exe') -Value 'retail'
+        $h1 = (Get-CatalogGame -Id 'mwr').Clients[0]
+        $null = Install-GameClient -GameId 'mwr' -ClientId 'h1-mod' -GameFolder $mwrFolder -Manifest (New-FakeManifest -Client $h1 -Files ([ordered]@{ 'h1-mod.exe' = 'exe'; 'cdata/ui/x.lua' = 'lua' })) -RetryDelaySeconds 0
+        Get-Text (Join-Path $mwrFolder 'h1-mod.exe') | Should -Be 'exe'
+        Get-Text (Join-Path $appData 'h1-mod\cdata\ui\x.lua') | Should -Be 'lua'
+    }
+}
+
+Describe 'Plutonium and launching games' {
+    BeforeEach {
+        $appData = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('appdata-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Mock Get-ClientAppDataRoot { $appData }
+        Mock Write-Host { }
+        $config = Join-Path $appData 'Plutonium\config.json'
+    }
+
+    It 'creates config.json with every field Plutonium expects' {
+        Set-PlutoniumGamePath -Key 't6Path' -Path 'D:\Games\BO2' | Should -BeTrue
+        $data = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+        $data.t6Path | Should -Be 'D:\Games\BO2'
+        foreach ($field in 'iw5Path', 't4Path', 't5Path', 'token') { $data.PSObject.Properties[$field] | Should -Not -BeNullOrEmpty -Because $field }
+    }
+
+    It 'keeps the login token and other settings' {
+        $null = New-Item -ItemType Directory -Path (Split-Path $config) -Force
+        Set-Content -LiteralPath $config -Value '{"token":"secret-token","t4Path":"C:\\WaW","extra":5}'
+        Set-PlutoniumGamePath -Key 't6Path' -Path 'D:\BO2' | Should -BeTrue
+        $data = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+        $data.token | Should -Be 'secret-token'
+        $data.t4Path | Should -Be 'C:\WaW'
+        $data.extra | Should -Be 5
+        $data.t6Path | Should -Be 'D:\BO2'
+    }
+
+    It 'leaves a config.json it cannot read alone' {
+        $null = New-Item -ItemType Directory -Path (Split-Path $config) -Force
+        Set-Content -LiteralPath $config -Value '{ not json'
+        Set-PlutoniumGamePath -Key 't6Path' -Path 'D:\BO2' | Should -BeFalse
+        Get-Text $config | Should -Be '{ not json'
+    }
+
+    It 'builds the exact command lines' {
+        $mw2 = Get-CatalogGame -Id 'mw2'
+        $cmd = Get-CatalogLaunchCommand -Game $mw2 -Mode ($mw2.Modes | Where-Object Id -eq 'mp') -GameFolder 'C:\MW2' -PlayerName 'Lark'
+        $cmd.FilePath | Should -Be 'C:\MW2\iw4x.exe'
+        $cmd.Arguments | Should -Be '+set name "Lark"'
+        $ghosts = Get-CatalogGame -Id 'ghosts'
+        (Get-CatalogLaunchCommand -Game $ghosts -Mode ($ghosts.Modes | Where-Object Id -eq 'sp') -GameFolder 'C:\G' -PlayerName '').Arguments | Should -Be '-noupdate -singleplayer'
+        $bo2 = Get-CatalogGame -Id 'bo2'
+        $pluto = Get-CatalogLaunchCommand -Game $bo2 -Mode ($bo2.Modes | Where-Object Id -eq 'zm') -GameFolder 'C:\BO2'
+        $pluto.FilePath | Should -Be (Join-Path $appData 'Plutonium\bin\plutonium-launcher-win32.exe')
+        $pluto.Arguments | Should -Be 'plutonium://play/t6zm'
+        $cod2 = Get-CatalogGame -Id 'cod2'
+        (Get-CatalogLaunchCommand -Game $cod2 -Mode ($cod2.Modes | Where-Object Id -eq 'mp') -GameFolder 'C:\C2').Elevate | Should -BeTrue
+    }
+
+    It 'cleans the player name to what the clients accept' {
+        Get-CleanPlayerName 'A very long player name here' | Should -Be 'A very long play'
+        Get-CleanPlayerName 'bad"name;&' | Should -Be 'badname'
+        Get-CleanPlayerName '   ' | Should -Be ''
+    }
+
+    It 'will not start a mode whose client is not installed' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('ghosts-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $folder 'iw6mp64_ship.exe') -Value 'retail'
+        Mock Start-Process { }
+        { Start-CatalogGame -GameId 'ghosts' -ModeId 'mp' -GameFolder $folder } | Should -Throw '*needs IW6x*'
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It 'starts nothing in sandbox mode and reports the command instead' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $folder 'CoDMP.exe') -Value 'retail'
+        Mock Start-Process { }
+        Mock Test-SandboxMode { $true }
+        $cmd = Start-CatalogGame -GameId 'cod1' -ModeId 'mp' -GameFolder $folder
+        $cmd.Arguments | Should -Be '+set com_hunkmegs 512 +set r_lodbias -1000'
+        Should -Invoke Start-Process -Times 0
     }
 }
 
