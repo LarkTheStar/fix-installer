@@ -796,10 +796,24 @@ function Receive-DownloadAttempt {
     try {
         try { $response = $request.GetResponse() }
         catch [System.Net.WebException] {
+            $status = if ($null -ne $_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
             # 416: the range is past the end (the file on disk is already complete or
             # wrong). Start the next attempt from scratch.
-            if ($ResumeFrom -gt 0 -and $null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 416) {
+            if ($ResumeFrom -gt 0 -and $status -eq 416) {
                 Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            }
+            # 404/410: the file is gone; trying again cannot help.
+            if ($status -eq 404 -or $status -eq 410) {
+                $gone = [System.Exception]::new("The file is no longer published at $Url (HTTP $status).", $_.Exception)
+                $gone.Data['NoRetry'] = $true
+                throw $gone
+            }
+            # 429 and 5xx: busy or failing server; a Retry-After header says how long to wait.
+            if ($status -eq 429 -or ($status -ge 500 -and $status -le 599)) {
+                $busy = [System.Exception]::new("The server answered HTTP $status for $Url.", $_.Exception)
+                $retryAfter = 0
+                if ([int]::TryParse([string]$_.Exception.Response.Headers['Retry-After'], [ref]$retryAfter) -and $retryAfter -gt 0) { $busy.Data['RetryAfter'] = [Math]::Min($retryAfter, 60) }
+                throw $busy
             }
             throw
         }
@@ -846,9 +860,13 @@ function Invoke-ResumableDownload {
         [Parameter(Mandatory)][string]$Destination,
         [Parameter(Mandatory)][string]$Label,
         [string]$ExpectedSha256 = $null,
+        # CB's client manifests publish SHA-1 only; checked in addition to any SHA-256.
+        [string]$ExpectedSha1 = '',
         [string]$UserAgent = 'CallOfDutyHQ-SetupUtility/1.1',
         [int]$MaxAttempts = 4,
-        [int]$RetryDelaySeconds = 3
+        [int]$RetryDelaySeconds = 3,
+        # Returns size, SHA-256 and SHA-1 instead of the size alone (for install records).
+        [switch]$PassThru
     )
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { Write-Verbose 'TLS 1.2 could not be selected; using the system default.' }
     if (-not $PSBoundParameters.ContainsKey('ExpectedSha256')) { $ExpectedSha256 = Get-ExpectedDownloadHash -Url $Url }
@@ -863,19 +881,77 @@ function Invoke-ResumableDownload {
             $bytes = Receive-DownloadAttempt -Url $Url -Destination $Destination -Label $Label -UserAgent $UserAgent -ResumeFrom $resumeFrom
             break
         } catch {
+            if ($_.Exception.Data['NoRetry'] -eq $true) { throw }
             if ($attempt -ge $MaxAttempts) { throw }
             Write-Warn ("Download interrupted ({0}). Trying again ({1} of {2}), continuing from the {3:N1} MB already received..." -f $_.Exception.Message, ($attempt + 1), $MaxAttempts, ($(if (Test-Path -LiteralPath $Destination -PathType Leaf) { (Get-Item -LiteralPath $Destination).Length } else { 0 }) / 1MB))
-            if ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds ($RetryDelaySeconds * $attempt) }
+            $retryAfter = $_.Exception.Data['RetryAfter']
+            if ($null -ne $retryAfter) { Start-Sleep -Seconds ([int]$retryAfter) }
+            elseif ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds ($RetryDelaySeconds * $attempt) }
         }
     }
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
-        $actual = Get-FileSha256 -Path $Destination
-        if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
-            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-            throw "The downloaded file does not match its published checksum (expected SHA-256 $ExpectedSha256, got $actual). It was deleted and nothing was installed from it."
-        }
+    $sha256 = ''
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -or $PassThru) { $sha256 = Get-FileSha256 -Path $Destination }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and $sha256 -ne $ExpectedSha256.ToLowerInvariant()) {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        throw "The downloaded file does not match its published checksum (expected SHA-256 $ExpectedSha256, got $sha256). It was deleted and nothing was installed from it."
     }
+    $sha1 = ''
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha1) -or $PassThru) { $sha1 = (Get-FileHash -LiteralPath $Destination -Algorithm SHA1).Hash.ToUpperInvariant() }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha1) -and $sha1 -ne $ExpectedSha1.ToUpperInvariant()) {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        throw "The downloaded file does not match its manifest (expected SHA-1 $ExpectedSha1, got $sha1). It was deleted and nothing was installed from it."
+    }
+    if ($PassThru) { return [pscustomobject]@{ Bytes = $bytes; Sha256 = $sha256; Sha1 = $sha1 } }
     return $bytes
+}
+
+# CB's client update sources, in the launcher's own order: its CDN mirrors (North
+# America, then Europe), then GitHub as the last resort.
+function Get-ClientUpdateBases {
+    return @('https://cdn-na.cbservers.xyz/updater/', 'https://cdn-eu.cbservers.dev/updater/', 'https://github.com/CBServers/updater/raw/main/updater/')
+}
+
+# Reads a CB client manifest ([path, size, sha1, dest?] entries plus an optional
+# {ManifestHash}) from the first source that answers, checking every entry. Returns
+# the entries, the ManifestHash and the base URL it came from (files are fetched from
+# the same base first).
+function Get-ClientManifest {
+    param([Parameter(Mandatory)][string]$Manifest, [string[]]$Bases = @(Get-ClientUpdateBases))
+    $errors = [System.Collections.Generic.List[string]]::new()
+    foreach ($base in $Bases) {
+        try {
+            $url = $base + $Manifest + '?' + [DateTime]::UtcNow.Ticks
+            $raw = Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'CallOfDutyHQ-SetupUtility/1.1' } -TimeoutSec 60
+            # Mirrors differ in the content type they send, so text or bytes may come
+            # back unparsed.
+            if ($raw -is [byte[]]) { $raw = [Text.Encoding]::UTF8.GetString($raw) }
+            if ($raw -is [string]) { $raw = ConvertFrom-Json -InputObject $raw.TrimStart([char]0xFEFF) }
+            $items = @($raw)
+            $entries = [System.Collections.Generic.List[object]]::new()
+            $manifestHash = ''
+            foreach ($item in $items) {
+                if ($item -is [array] -or ($item -is [System.Collections.IList] -and $item -isnot [string])) {
+                    if ($item.Count -lt 3) { throw "An entry has fewer than three fields." }
+                    $path = [string]$item[0]
+                    $null = Get-ValidatedRelativePath $path
+                    $size = [int64]$item[1]
+                    $sha1 = ([string]$item[2]).ToUpperInvariant()
+                    if ($size -lt 0) { throw "Negative size for $path." }
+                    if ($sha1 -notmatch '^[0-9A-F]{40}$') { throw "Bad SHA-1 for $path." }
+                    $dest = if ($item.Count -gt 3) { [string]$item[3] } else { '' }
+                    if ($dest -and $dest -notin @('game', 'appdata')) { throw "Unknown destination '$dest' for $path." }
+                    $entries.Add([pscustomobject]@{ Path = ($path -replace '\\', '/'); Size = $size; Sha1 = $sha1; Dest = $dest })
+                } elseif ($null -ne $item -and $null -ne $item.ManifestHash) {
+                    $manifestHash = [string]$item.ManifestHash
+                }
+            }
+            if ($entries.Count -eq 0) { throw 'The manifest lists no files.' }
+            return [pscustomobject]@{ Name = $Manifest; Base = $base; Entries = $entries.ToArray(); ManifestHash = $manifestHash }
+        } catch {
+            $errors.Add("$base$Manifest : $($_.Exception.Message)")
+        }
+    }
+    throw ("Could not read the client manifest $Manifest from any source:`n  " + ($errors -join "`n  "))
 }
 
 function Download-FileWithProgress {

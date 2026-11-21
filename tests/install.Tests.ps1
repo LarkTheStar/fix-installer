@@ -31,14 +31,16 @@ BeforeAll {
     # A tiny HTTP server on 127.0.0.1 for the download tests. It serves $Content,
     # honours "Range: bytes=N-" (unless -NoRange), and for the first $FailRequests
     # requests sends only $FailAfterBytes bytes of the body and drops the connection.
+    # -Statuses answers the first requests with these HTTP status codes (no body) before
+    # serving normally; -RetryAfter adds a Retry-After header to those answers.
     function Start-TestHttpServer {
-        param([byte[]]$Content, [int]$FailRequests = 0, [int]$FailAfterBytes = 0, [switch]$NoRange)
+        param([byte[]]$Content, [int]$FailRequests = 0, [int]$FailAfterBytes = 0, [switch]$NoRange, [int[]]$Statuses = @(), [int]$RetryAfter = 0)
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
         $listener.Start()
         $state = [hashtable]::Synchronized(@{ Requests = 0; Ranges = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new()) })
         $shell = [powershell]::Create()
         [void]$shell.AddScript({
-            param($listener, [byte[]]$content, $failRequests, $failAfter, $noRange, $state)
+            param($listener, [byte[]]$content, $failRequests, $failAfter, $noRange, $state, [int[]]$statuses, $retryAfter)
             while ($true) {
                 try { $client = $listener.AcceptTcpClient() } catch { break }
                 try {
@@ -52,6 +54,14 @@ BeforeAll {
                     }
                     $state.Requests++
                     [void]$state.Ranges.Add($start)
+                    if ($state.Requests -le $statuses.Count) {
+                        $code = $statuses[$state.Requests - 1]
+                        $reply = "HTTP/1.1 $code Test`r`nContent-Length: 0`r`nConnection: close`r`n"
+                        if ($retryAfter -gt 0) { $reply += "Retry-After: $retryAfter`r`n" }
+                        $replyBytes = [Text.Encoding]::ASCII.GetBytes($reply + "`r`n")
+                        $stream.Write($replyBytes, 0, $replyBytes.Length); $stream.Flush()
+                        continue
+                    }
                     if ($noRange) { $start = 0 }
                     $body = $content.Length - $start
                     $status = if ($start -gt 0) { '206 Partial Content' } else { '200 OK' }
@@ -66,7 +76,7 @@ BeforeAll {
                     $stream.Flush()
                 } catch { } finally { $client.Close() }
             }
-        }).AddArgument($listener).AddArgument($Content).AddArgument($FailRequests).AddArgument($FailAfterBytes).AddArgument([bool]$NoRange).AddArgument($state)
+        }).AddArgument($listener).AddArgument($Content).AddArgument($FailRequests).AddArgument($FailAfterBytes).AddArgument([bool]$NoRange).AddArgument($state).AddArgument([int[]]$Statuses).AddArgument($RetryAfter)
         $handle = $shell.BeginInvoke()
         [pscustomobject]@{ Url = "http://127.0.0.1:$($listener.LocalEndpoint.Port)/asset.bin"; Listener = $listener; Shell = $shell; Handle = $handle; State = $state }
     }
@@ -1032,6 +1042,35 @@ Describe 'Downloads: retries, resume and checksum' {
         Test-Path -LiteralPath $target | Should -BeFalse
     }
 
+    It 'stops at once on a file that is gone (404) and leaves nothing behind' {
+        $server = Start-TestHttpServer -Content $payload -Statuses @(404)
+        { Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 '' -RetryDelaySeconds 0 } | Should -Throw '*no longer published*404*'
+        $server.State.Requests | Should -Be 1
+    }
+
+    It 'retries a busy server (503) and waits as long as Retry-After says' {
+        Mock Start-Sleep { }
+        $server = Start-TestHttpServer -Content $payload -Statuses @(503, 429) -RetryAfter 2
+        Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 $payloadHash -RetryDelaySeconds 0 | Should -Be $payload.Length
+        $server.State.Requests | Should -Be 3
+        Should -Invoke Start-Sleep -Times 2 -ParameterFilter { $Seconds -eq 2 }
+    }
+
+    It 'checks a SHA-1 from a client manifest and returns both hashes' {
+        $server = Start-TestHttpServer -Content $payload
+        $sha1 = (Get-FileHash -InputStream ([IO.MemoryStream]::new($payload)) -Algorithm SHA1).Hash
+        $result = Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 '' -ExpectedSha1 $sha1 -RetryDelaySeconds 0 -PassThru
+        $result.Bytes | Should -Be $payload.Length
+        $result.Sha1 | Should -Be $sha1
+        $result.Sha256 | Should -Be $payloadHash
+    }
+
+    It 'deletes a download whose SHA-1 does not match its manifest' {
+        $server = Start-TestHttpServer -Content $payload
+        { Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 '' -ExpectedSha1 ('A' * 40) -RetryDelaySeconds 0 } | Should -Throw '*does not match its manifest*'
+        Test-Path -LiteralPath $target | Should -BeFalse
+    }
+
     It 'checks the downgrade downloader against the pinned hash too' {
         $server = Start-TestHttpServer -Content $payload
         Mock Get-ExpectedDownloadHash { '1' * 64 }
@@ -1203,6 +1242,37 @@ Describe 'Game catalogue' {
         $client = ($catalog | Where-Object Id -eq 'ghosts').Clients[0]
         Get-ClientEntryVerdict -Client $client -Path 'something-new.exe' | Should -Be 'skip'
         Get-ClientEntryVerdict -Client $client -Path 'data/scripts/new.gsc' | Should -Be 'allow'
+    }
+}
+
+Describe 'Client manifests' {
+    BeforeEach { $servers = [System.Collections.Generic.List[object]]::new() }
+    AfterEach { foreach ($s in $servers) { Stop-TestHttpServer $s } }
+
+    It 'reads entries, destinations and the manifest hash' {
+        $json = '[["iw6x.exe",3,"' + ('A' * 40) + '"],["data/a.txt",1,"' + ('b' * 40) + '","appdata"],{"ManifestHash":"' + ('C' * 64) + '"}]'
+        $server = Start-TestHttpServer -Content ([Text.Encoding]::ASCII.GetBytes($json)); $servers.Add($server)
+        $base = $server.Url -replace 'asset\.bin$', ''
+        $manifest = Get-ClientManifest -Manifest 'x.json' -Bases @($base)
+        $manifest.Entries.Count | Should -Be 2
+        $manifest.Entries[1].Dest | Should -Be 'appdata'
+        $manifest.Entries[1].Sha1 | Should -Be ('B' * 40)
+        $manifest.ManifestHash | Should -Be ('C' * 64)
+    }
+
+    It 'falls back to the next source when one fails' {
+        $json = '[["iw6x.exe",3,"' + ('A' * 40) + '"]]'
+        $bad = Start-TestHttpServer -Content ([byte[]]@()) -Statuses @(404); $servers.Add($bad)
+        $good = Start-TestHttpServer -Content ([Text.Encoding]::ASCII.GetBytes($json)); $servers.Add($good)
+        $manifest = Get-ClientManifest -Manifest 'x.json' -Bases @(($bad.Url -replace 'asset\.bin$', ''), ($good.Url -replace 'asset\.bin$', ''))
+        $manifest.Base | Should -Be ($good.Url -replace 'asset\.bin$', '')
+    }
+
+    It 'refuses a manifest with an unsafe path or a bad hash' {
+        foreach ($json in @('[["../evil.exe",3,"' + ('A' * 40) + '"]]', '[["ok.exe",3,"nothex"]]')) {
+            $server = Start-TestHttpServer -Content ([Text.Encoding]::ASCII.GetBytes($json)); $servers.Add($server)
+            { Get-ClientManifest -Manifest 'x.json' -Bases @(($server.Url -replace 'asset\.bin$', '')) } | Should -Throw '*Could not read the client manifest*'
+        }
     }
 }
 
