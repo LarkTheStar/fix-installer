@@ -10,6 +10,7 @@ clients to this installer.
 | [provenance.md](provenance.md) | Every resource, where it comes from, who publishes it, and whether the installer uses it, with evidence |
 | [inventory.md](inventory.md) / `inventory.json` | Every file of the published launcher: path, size, SHA-1, SHA-256, version |
 | [manifests.md](manifests.md) / `audit.json` | All 25 client manifests audited file by file |
+| [cod1-uo-cod2.md](cod1-uo-cod2.md) | Fresh scrape for Call of Duty, United Offensive and Call of Duty 2: their five manifests, game configuration, full-game manifests and launcher files, with nothing downloaded |
 | [cdn-report.md](cdn-report.md) | Hosts, mirrors, the two manifest formats, how updates and resumes work |
 | [games.md](games.md) | Every game: identifiers, Steam app IDs, executables, modes, exact launch arguments, clients |
 | [languages.md](languages.md) | The launcher's language system and how it compares with this installer's |
