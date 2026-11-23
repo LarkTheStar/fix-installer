@@ -1569,6 +1569,7 @@ Describe 'Plutonium and launching games' {
     It 'starts nothing in sandbox mode and reports the command instead' {
         $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
         Set-Content -LiteralPath (Join-Path $folder 'CoDMP.exe') -Value 'retail'
+        Set-Content -LiteralPath (Join-Path $folder 'mss32.dll') -Value 'miles'
         Mock Start-Process { }
         Mock Test-SandboxMode { $true }
         $cmd = Start-CatalogGame -GameId 'cod1' -ModeId 'mp' -GameFolder $folder
@@ -1753,6 +1754,7 @@ Describe 'Game versions: imported files, release archives, exe copies and launch
         $gameFolder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('game-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
         $ownCopy = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('copy-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
         Set-Content -LiteralPath (Join-Path $gameFolder 'CoDMP.exe') -Value 'steam mp' -NoNewline
+        Set-Content -LiteralPath (Join-Path $gameFolder 'mss32.dll') -Value 'miles' -NoNewline
         $null = New-Item -ItemType Directory -Path (Join-Path $gameFolder 'Main') -Force
         Set-Content -LiteralPath (Join-Path $gameFolder 'Main\pak0.pk3') -Value 'steam pak0' -NoNewline
         Set-Content -LiteralPath (Join-Path $gameFolder 'Main\pak1.pk3') -Value 'steam pak1' -NoNewline
@@ -1831,6 +1833,26 @@ Describe 'Game versions: imported files, release archives, exe copies and launch
         $script:testGame.Clients = @(New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github' -Assets $bad)
         { Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder -RetryDelaySeconds 0 } | Should -Throw
         Get-Text (Join-Path $gameFolder 'CoDMP.exe') | Should -Be 'steam mp'
+    }
+
+    It 'reads an executable''s imports and reports the ones that are missing' {
+        @(Get-ExecutableImportNames -Path $script:peSource) | Should -Contain 'mscoree.dll'
+        @(Get-MissingExecutableDependency -Executable $script:peSource).Count | Should -Be 0
+        $script:testGame.Modes = @(New-CatalogMode 'sp' 'Campaign' -Exe 'CoDMP.exe')
+        $isolated = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('dep-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Copy-Item -LiteralPath $script:peSource -Destination (Join-Path $isolated 'CoDMP.exe')
+        Mock Get-ExecutableImportNames { @('mss32.dll') }
+        Get-ModeBlocker -Game $script:testGame -Mode $script:testGame.Modes[0] -GameFolder $isolated | Should -BeLike '*missing mss32.dll*Verify integrity*'
+    }
+
+    It 'will not start Call of Duty when its own install is missing a base file' {
+        $script:testGame.Id = 'cod1'
+        $script:testGame.Modes = @(New-CatalogMode 'sp' 'Campaign' -Exe 'CoDMP.exe')
+        $bare = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('bare-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $bare 'CoDMP.exe') -Value 'steam stub' -NoNewline
+        Get-ModeBlocker -Game $script:testGame -Mode $script:testGame.Modes[0] -GameFolder $bare | Should -BeLike '*missing mss32.dll*Verify integrity*share one folder*'
+        Set-Content -LiteralPath (Join-Path $bare 'mss32.dll') -Value 'miles' -NoNewline
+        Get-ModeBlocker -Game $script:testGame -Mode $script:testGame.Modes[0] -GameFolder $bare | Should -Be ''
     }
 
     It 'renames exactly one imported DLL in a copy of an executable and leaves the original alone' {

@@ -3199,6 +3199,96 @@ function New-ImportRenamedExecutable {
     [IO.File]::WriteAllBytes($Destination, $bytes)
 }
 
+# The DLLs a Windows executable imports, read from its PE import table.
+function Get-ExecutableImportNames {
+    param([Parameter(Mandatory)][string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { return @() }
+    $pe = [int][BitConverter]::ToUInt32($bytes, 0x3C)
+    if ($pe -lt 0 -or $pe + 24 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x00004550) { return @() }
+    $sectionCount = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    $optionalSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+    $optional = $pe + 24
+    $directories = if ([BitConverter]::ToUInt16($bytes, $optional) -eq 0x20B) { $optional + 112 } else { $optional + 96 }
+    $importRva = [int64][BitConverter]::ToUInt32($bytes, $directories + 8)
+    if ($importRva -eq 0) { return @() }
+    $sectionTable = $optional + $optionalSize
+    $toOffset = {
+        param([int64]$Rva)
+        for ($s = 0; $s -lt $sectionCount; $s++) {
+            $h = $sectionTable + 40 * $s
+            $va = [int64][BitConverter]::ToUInt32($bytes, $h + 12)
+            $span = [Math]::Max([int64][BitConverter]::ToUInt32($bytes, $h + 8), [int64][BitConverter]::ToUInt32($bytes, $h + 16))
+            if ($Rva -ge $va -and $Rva -lt $va + $span) { return [int]($Rva - $va + [int64][BitConverter]::ToUInt32($bytes, $h + 20)) }
+        }
+        return -1
+    }
+    $descriptor = & $toOffset $importRva
+    $names = [System.Collections.Generic.List[string]]::new()
+    while ($descriptor -ge 0 -and $descriptor + 20 -le $bytes.Length) {
+        $nameRva = [int64][BitConverter]::ToUInt32($bytes, $descriptor + 12)
+        if ($nameRva -eq 0) { break }
+        $nameOffset = & $toOffset $nameRva
+        if ($nameOffset -lt 0) { break }
+        $end = $nameOffset
+        while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+        $names.Add([Text.Encoding]::ASCII.GetString($bytes, $nameOffset, $end - $nameOffset))
+        $descriptor += 20
+    }
+    return $names.ToArray()
+}
+
+# DLLs an executable imports that are neither next to it nor in Windows. A game that is
+# missing one of them shows a Windows error box instead of starting: Call of Duty
+# without mss32.dll (after United Offensive was uninstalled from the shared folder) and
+# Call of Duty 2 without steam_api.dll both fail exactly that way.
+function Get-MissingExecutableDependency {
+    param([Parameter(Mandatory)][string]$Executable)
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) { return @() }
+    $key = $Executable.ToLowerInvariant() + '|' + (Get-Item -LiteralPath $Executable).LastWriteTimeUtc.Ticks
+    if ($null -eq $global:MissingDependencyCache) { $global:MissingDependencyCache = @{} }
+    if ($global:MissingDependencyCache.ContainsKey($key)) { return $global:MissingDependencyCache[$key] }
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $folder = Split-Path -Parent $Executable
+    $systemDirs = @((Join-Path $env:WINDIR 'System32'), (Join-Path $env:WINDIR 'SysWOW64'), $env:WINDIR)
+    foreach ($name in @(Get-ExecutableImportNames -Path $Executable)) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        $found = Test-Path -LiteralPath (Join-Path $folder $name) -PathType Leaf
+        if (-not $found) {
+            foreach ($dir in $systemDirs) { if ($dir -and (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf)) { $found = $true; break } }
+        }
+        if (-not $found -and -not ($missing -contains $name)) { $missing.Add($name) }
+    }
+    $result = $missing.ToArray()
+    $global:MissingDependencyCache[$key] = $result
+    return $result
+}
+
+# Files the game's own install must have before any mode can start. Steam wraps the
+# old Call of Duty executables, so they import only kernel32 and the real dependencies
+# are loaded at run time: a missing file turns into a Windows error box instead of a
+# useful message. Call of Duty and United Offensive share one folder, and Steam's
+# uninstall of either can take mss32.dll with it; a Steam copy of Call of Duty 2 needs
+# steam_api.dll next to the game.
+function Get-GameMissingBaseFile {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$GameFolder)
+    $required = [System.Collections.Generic.List[string]]::new()
+    switch ($Game.Id) {
+        'cod1' { $required.Add('mss32.dll') }
+        'coduo' { $required.Add('mss32.dll') }
+        'cod2' {
+            $required.Add('mss32.dll')
+            # Only the Steam build: a retail copy runs without Steam.
+            if (Test-Path -LiteralPath (Join-Path $GameFolder 'instscript.vdf') -PathType Leaf) { $required.Add('steam_api.dll') }
+        }
+    }
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $required) {
+        if (-not (Test-Path -LiteralPath (Join-Path $GameFolder $name) -PathType Leaf)) { $missing.Add($name) }
+    }
+    return $missing.ToArray()
+}
+
 # The newest GitHub release of a repository (optionally the newest whose tag starts
 # with a prefix), with each asset's size and SHA-256 digest as GitHub publishes it.
 function Get-GitHubRelease {
@@ -3524,6 +3614,12 @@ function Install-GameClient {
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
     if (-not $GameFolder -or -not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    # The client can be installed on an incomplete game, but say so: the game will not
+    # start until Steam puts its own files back.
+    $missingBase = @(Get-GameMissingBaseFile -Game $game -GameFolder $GameFolder)
+    if ($missingBase.Count -gt 0) {
+        Write-Warn "$($game.Name) is missing $($missingBase -join ', ') from its own install. Verify the game files in Steam before playing; $($client.Name) is installed anyway."
+    }
     foreach ($other in @($client.Conflicts)) {
         if (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $other) {
             $otherName = ($game.Clients | Where-Object { $_.Id -eq $other } | Select-Object -First 1).Name
@@ -4018,6 +4114,23 @@ function Get-CatalogClientName {
 # Why a mode cannot start right now, or '' when it can.
 function Get-ModeBlocker {
     param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Mode, [Parameter(Mandatory)][string]$GameFolder)
+    # A Windows error box ("could not be located in the DLL mss32.dll", "Failed to find
+    # Steam") is never useful: check the executable's own DLLs first.
+    if ($Mode.Kind -eq 'exe') {
+        $exePath = Join-Path $GameFolder $Mode.Exe
+        if (Test-Path -LiteralPath $exePath -PathType Leaf) {
+            $missingDlls = @(Get-MissingExecutableDependency -Executable $exePath)
+            if ($missingDlls.Count -gt 0) {
+                $hint = if ($Game.Id -in 'cod1', 'coduo') { ' Call of Duty and United Offensive share one folder, so installing the other one again also brings the shared files back.' } else { '' }
+                return "$($Mode.Label) cannot start: your $($Game.Name) install is missing $($missingDlls -join ', '). In Steam: right-click the game > Properties > Installed Files > Verify integrity of game files, then try again.$hint"
+            }
+        }
+    }
+    $missingBase = @(Get-GameMissingBaseFile -Game $Game -GameFolder $GameFolder)
+    if ($missingBase.Count -gt 0) {
+        $hint = if ($Game.Id -in 'cod1', 'coduo') { ' Call of Duty and United Offensive share one folder, so installing the other one again also brings the shared files back.' } else { '' }
+        return "$($Mode.Label) cannot start: your $($Game.Name) install is missing $($missingBase -join ', '). In Steam: right-click the game > Properties > Installed Files > Verify integrity of game files, then try again.$hint"
+    }
     if (@($Mode.Clients).Count -gt 0) {
         $installed = @($Mode.Clients | Where-Object { Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_ })
         if ($installed.Count -eq 0) { return ("$($Mode.Label) needs " + (($Mode.Clients | ForEach-Object { Get-CatalogClientName $_ $Game }) -join ' or ') + '. Use Install client first.') }
