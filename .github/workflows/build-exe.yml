@@ -1,0 +1,47 @@
+name: Build exe
+
+# Builds dist\CodHQ-Setup.exe (install.ps1 embedded in a small launcher, see
+# tools\Build-Exe.ps1), checks it with tests\Test-Exe.ps1, and keeps it as a build
+# artifact. The first build of each new $AppVersion is published as a pre-release
+# named app-v<version>; later builds of the same version are artifacts only.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths: ['install.ps1', 'tools/Build-Exe.ps1', 'tools/exe/**', 'tests/Test-Exe.ps1', '.github/workflows/build-exe.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build
+        shell: powershell
+        run: .\tools\Build-Exe.ps1
+
+      - name: Check
+        shell: powershell
+        run: .\tests\Test-Exe.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodHQ-Setup
+          path: dist/CodHQ-Setup.exe
+
+      - name: Publish the first build of this version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = [regex]::Match((Get-Content install.ps1 -Raw), "(?m)^\`$AppVersion = '([0-9.]+)'").Groups[1].Value
+          $tag = "app-v$version"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Output "Release $tag exists; this build is kept as an artifact only."; exit 0 }
+          $hash = (Get-FileHash dist\CodHQ-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = "CodHQ-Setup.exe for version $version, built from $env:GITHUB_SHA.`n`nSHA-256: $hash`n`nThe exe is not code-signed, so Windows SmartScreen may warn the first time: More info > Run anyway."
+          gh release create $tag dist\CodHQ-Setup.exe --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Setup Utility $version (exe)" --notes $notes --prerelease

@@ -1,0 +1,2 @@
+# Built by tools/Build-Exe.ps1; published by .github/workflows/build-exe.yml.
+dist/
