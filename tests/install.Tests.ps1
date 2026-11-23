@@ -1575,6 +1575,16 @@ Describe 'Plutonium and launching games' {
         $cmd.Arguments | Should -Be '+set com_hunkmegs 512 +set r_lodbias -1000 +set cl_motd 0'
         Should -Invoke Start-Process -Times 0
     }
+
+    It 'opens a Steam link through steam.exe and falls back to the web page' {
+        Mock Test-SandboxMode { $false }
+        Mock Get-SteamInstallationPath { $null }
+        Mock Start-Process { throw 'no handler' } -ParameterFilter { $FilePath -like 'steam://*' }
+        Mock Start-Process { }
+        Open-SteamUrl -Url 'steam://store/2620' -WebFallback 'https://store.steampowered.com/app/2620/' | Should -Be 'web'
+        Mock Start-Process { } -ParameterFilter { $FilePath -like 'steam://*' }
+        Open-SteamUrl -Url 'steam://store/2620' | Should -Be 'url'
+    }
 }
 
 Describe 'CD keys (the player''s own)' -Skip:([bool]$IsLinux -or [bool]$IsMacOS) {
@@ -1683,6 +1693,13 @@ Describe 'Game detection' {
         Test-CatalogGameFolder -Game $game -Folder $cod4 | Should -BeFalse
     }
 
+    It 'finds United Offensive inside Call of Duty''s folder when its own manifest is gone' {
+        $cod1 = Join-Path $library 'steamapps\common\Call of Duty'
+        $null = New-Item -ItemType Directory -Path $cod1 -Force
+        Set-Content -LiteralPath (Join-Path $cod1 'CoDUOSP.exe') -Value 'fake'
+        (Find-CatalogGame -Game (Get-CatalogGame -Id 'coduo')).Folder | Should -Be ([IO.Path]::GetFullPath($cod1).TrimEnd('\'))
+    }
+
     It 'prefers a saved folder and keeps the MW4 settings apart' {
         $other = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod4-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
         Set-Content -LiteralPath (Join-Path $other 'iw3sp.exe') -Value 'fake'
@@ -1783,6 +1800,14 @@ Describe 'Game versions: imported files, release archives, exe copies and launch
         { Install-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder -ImportFolder $ownCopy } | Should -Throw "*Main/pak0.pk3 (15 bytes, CRC-32 $crc)*Nothing was changed*"
         { Install-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder } | Should -Throw '*use Import*'
         Get-FolderState $gameFolder | Should -Be $before
+    }
+
+    It 'recognises the player''s own files in the game folder itself' {
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-v11' -Name 'Test 1.1 files' -Source 'import' -Assets @(
+            [pscustomobject]@{ Path = 'Main/pak0.pk3'; Size = 15; Crc32 = (Get-StringCrc32 'retail pak0 1.1') }))
+        Find-ImportSource -Client $script:testGame.Clients[0] -Game $script:testGame -GameFolder $gameFolder | Should -Be ''
+        Set-Content -LiteralPath (Join-Path $gameFolder 'Main\pak0.pk3') -Value 'retail pak0 1.1' -NoNewline
+        Find-ImportSource -Client $script:testGame.Clients[0] -Game $script:testGame -GameFolder $gameFolder | Should -Be $gameFolder.TrimEnd('\')
     }
 
     It 'takes files out of a release archive, each checked, and refuses an archive that does not match' {

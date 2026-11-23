@@ -2078,7 +2078,11 @@ function Start-SteamClient {
         return
     }
     if ($OnlyIfNotRunning -and (Get-Process -Name steam -ErrorAction SilentlyContinue)) { return }
-    Start-Process -FilePath $SteamExe
+    try {
+        Start-Process -FilePath $SteamExe
+    } catch {
+        throw "Steam could not be started from '$SteamExe': $($_.Exception.Message)"
+    }
 }
 
 function Start-SteamValidation {
@@ -2086,7 +2090,43 @@ function Start-SteamValidation {
         Write-Host "[SANDBOX] Steam would be asked to validate app $AppId here; skipped in sandbox mode." -ForegroundColor DarkYellow
         return
     }
-    Start-Process "steam://validate/$AppId"
+    $null = Open-SteamUrl -Url "steam://validate/$AppId"
+}
+
+# Opens a steam:// URL. Steam's installer registers the protocol handler; when it is
+# missing (Steam was moved or set up without it), steam.exe takes the URL as its
+# argument, and when Steam cannot be started at all the web page is opened instead, so
+# a button never fails without a usable result.
+function Open-SteamUrl {
+    param([Parameter(Mandatory)][string]$Url, [string]$WebFallback = '')
+    if (Test-SandboxMode) {
+        Write-Host "[SANDBOX] Would open: $Url" -ForegroundColor DarkYellow
+        return 'sandbox'
+    }
+    try {
+        Start-Process $Url
+        return 'url'
+    } catch {
+        Write-Verbose "The steam:// handler could not be used: $($_.Exception.Message)"
+    }
+    $steamRoot = Get-SteamInstallationPath
+    if ($steamRoot) {
+        $steamExe = Join-Path $steamRoot 'steam.exe'
+        if (Test-Path -LiteralPath $steamExe -PathType Leaf) {
+            try {
+                Start-Process -FilePath $steamExe -ArgumentList @($Url)
+                return 'steam'
+            } catch {
+                Write-Verbose "Steam could not be started: $($_.Exception.Message)"
+            }
+        }
+    }
+    if ($WebFallback) {
+        Start-Process $WebFallback
+        Write-Warn "Steam could not be opened; the store page was opened in your browser instead: $WebFallback"
+        return 'web'
+    }
+    throw "Steam could not be opened ($Url). Start Steam yourself, then try again."
 }
 
 # Sandbox mode (-Sandbox <folder>) is for testing the utility end to end, including
@@ -2997,6 +3037,18 @@ function Find-CatalogGame {
             if (Test-CatalogGameFolder -Game $Game -Folder $candidate) { return [pscustomobject]@{ Folder = [IO.Path]::GetFullPath($candidate).TrimEnd('\'); Source = 'steam' } }
         }
     }
+    # United Offensive installs into Call of Duty's folder, and a game's own appmanifest
+    # can be missing after a move or a manual copy. Look through each library's common
+    # folder for the game's marker files before giving up.
+    foreach ($library in @(Get-SteamLibraries)) {
+        $common = Join-Path $library 'steamapps\common'
+        if (-not (Test-Path -LiteralPath $common -PathType Container)) { continue }
+        foreach ($directory in @(Get-ChildItem -LiteralPath $common -Directory -Force -ErrorAction SilentlyContinue)) {
+            if (Test-CatalogGameFolder -Game $Game -Folder $directory.FullName) {
+                return [pscustomobject]@{ Folder = [IO.Path]::GetFullPath($directory.FullName).TrimEnd('\'); Source = 'steam' }
+            }
+        }
+    }
     if ($Game.Detect -eq 'battlenet' -and -not (Test-SandboxMode)) {
         $folder = Find-BattleNetInstall -DisplayNames @('Call of Duty*Black Ops 4*', 'Call of Duty: Black Ops 4*')
         if ($folder -and (Test-CatalogGameFolder -Game $Game -Folder $folder)) { return [pscustomobject]@{ Folder = $folder; Source = 'battlenet' } }
@@ -3250,6 +3302,56 @@ function Get-ImportFolderIndex {
     return $index
 }
 
+# Looks for a client's imported files where a player's own copy of the game is usually
+# kept: the game folder itself, disc drives, and folders named after the game on each
+# drive and under Program Files. A folder only counts when every file the client needs
+# is there with its own size and CRC-32, so a Steam build is never mistaken for it.
+function Find-ImportSource {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)]$Game, [string]$GameFolder = '')
+    $wanted = @($Client.Assets | Where-Object { $_.Crc32 })
+    if ($wanted.Count -eq 0) { return '' }
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if ($GameFolder) { $candidates.Add($GameFolder) }
+    $roots = [System.Collections.Generic.List[string]]::new()
+    foreach ($drive in @([IO.DriveInfo]::GetDrives())) {
+        if (-not $drive.IsReady) { continue }
+        if ($drive.DriveType -eq [IO.DriveType]::CDRom) { $candidates.Add($drive.RootDirectory.FullName) }
+        elseif ($drive.DriveType -eq [IO.DriveType]::Fixed) { $roots.Add($drive.RootDirectory.FullName) }
+    }
+    $names = @('Call of Duty*', 'United Offensive*')
+    foreach ($root in $roots) {
+        foreach ($folder in @('', 'Program Files', 'Program Files (x86)', 'Games', 'Activision', 'SteamLibrary\steamapps\common')) {
+            $parent = if ($folder) { Join-Path $root $folder } else { $root }
+            if (-not (Test-Path -LiteralPath $parent -PathType Container)) { continue }
+            if (-not $folder) { $candidates.Add($parent) }
+            foreach ($pattern in $names) {
+                foreach ($child in @(Get-ChildItem -LiteralPath $parent -Directory -Filter $pattern -Force -ErrorAction SilentlyContinue)) { $candidates.Add($child.FullName) }
+            }
+        }
+    }
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        $full = $candidate
+        try { $full = [IO.Path]::GetFullPath($candidate).TrimEnd('\') } catch { continue }
+        $key = $full.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        if (-not (Test-Path -LiteralPath $full -PathType Container)) { continue }
+        $matches = $true
+        foreach ($asset in $wanted) {
+            $file = Join-Path $full (([string]$asset.Path) -replace '/', '\')
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -ne [int64]$asset.Size) { $matches = $false; break }
+        }
+        if (-not $matches) { continue }
+        foreach ($asset in $wanted) {
+            $file = Join-Path $full (([string]$asset.Path) -replace '/', '\')
+            if ((Get-FileCrc32 -Path $file) -ne ([string]$asset.Crc32).ToUpperInvariant()) { $matches = $false; break }
+        }
+        if ($matches) { return $full }
+    }
+    return ''
+}
+
 # Works out what installing a client would do, without changing anything: which files
 # to download, which are already current, which of the game's own files are kept, which
 # names are made from the player's own files, and which manifest entries are skipped.
@@ -3441,7 +3543,16 @@ function Install-GameClient {
         if ($imports.Count -gt 0) {
             $list = ($imports | ForEach-Object { [string]::Format([cultureinfo]::InvariantCulture, '{0} ({1:N0} bytes, CRC-32 {2})', $_.Path, $_.Size, $_.Crc32) }) -join '; '
             $where = if ($ImportFolder) { 'were not found in ' + $ImportFolder } else { 'are needed; use Import and pick the folder of your own copy' }
-            throw ($client.Name + ': these files from your own copy of ' + $game.Name + ' ' + $where + ': ' + $list + '. Nothing was changed.')
+            # One line per file, so the list can be read and acted on instead of being
+            # one long error.
+            Write-Warn "$($client.Name): the files below are missing."
+            foreach ($step in $imports) {
+                Write-Info ([string]::Format([cultureinfo]::InvariantCulture, '  {0}  ({1:N0} bytes, CRC-32 {2})', $step.Path, $step.Size, $step.Crc32))
+            }
+            if ($ImportFolder -and (Test-Path -LiteralPath $ImportFolder -PathType Container) -and ([IO.Path]::GetFullPath($ImportFolder).TrimEnd('\') -ieq $GameFolder)) {
+                Write-Info 'That is the game folder itself: Steam ships a different build, so its files cannot stand in for the 1.1/1.51 ones.'
+            }
+            Stop-Cancelled ($client.Name + ': these files from your own copy of ' + $game.Name + ' ' + $where + ': ' + $list + '. Nothing was changed.')
         }
         if ($patches.Count -gt 0) {
             $needs = ($patches | ForEach-Object { if ($_.Asset.Needs) { [string]$_.Asset.Needs } else { [string]$_.Asset.PatchFrom } } | Select-Object -Unique) -join ', '
@@ -7215,9 +7326,11 @@ function Read-SecretInput {
 # game, client or mode. Same no-closure pattern as the other buttons.
 $global:GameActionMap = @{
     'steam' = { param($t) $game = Get-CatalogGame -Id $t.Game
-        $url = if ($game.ProjectUrl) { $game.ProjectUrl } else { 'steam://store/' + @($game.SteamAppIds)[0] }
-        if (Test-SandboxMode) { Write-Host "[SANDBOX] Would open: $url" -ForegroundColor DarkYellow; return }
-        Start-Process $url; Write-Ok "Opened $url" }
+        $appId = @($game.SteamAppIds) | Select-Object -First 1
+        $url = if ($game.ProjectUrl) { $game.ProjectUrl } else { 'steam://store/' + $appId }
+        $web = if ($appId) { 'https://store.steampowered.com/app/' + $appId + '/' } else { $game.ProjectUrl }
+        $null = Open-SteamUrl -Url $url -WebFallback $web
+        Write-Ok "Opened $url" }
     'folder' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
         $dialog.Description = "Select the $($game.Name) folder"; $dialog.ShowNewFolderButton = $false
@@ -7228,11 +7341,22 @@ $global:GameActionMap = @{
     'install' = { param($t) $null = Install-GameClient -GameId $t.Game -ClientId $t.Client }
     'import' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $client = $game.Clients | Where-Object { $_.Id -eq $t.Client } | Select-Object -First 1
-        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dialog.Description = "Select the folder of your own copy of $($game.Name) that has the $($client.Name) (a retail install, a backup or the disc). Subfolders are searched too."
-        $dialog.ShowNewFolderButton = $false
-        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { Write-Info 'Import cancelled.'; return }
-        $null = Install-GameClient -GameId $t.Game -ClientId $t.Client -ImportFolder $dialog.SelectedPath }
+        $found = Find-CatalogGame -Game $game
+        # Look where a player's own copy is usually kept before asking, so the folder
+        # dialog only appears when nothing on this PC matches.
+        Write-Info "Looking for the $($client.Name) on this PC (disc drives, Program Files and your game folders)..."
+        $source = if ($found) { Find-ImportSource -Client $client -Game $game -GameFolder $found.Folder } else { Find-ImportSource -Client $client -Game $game }
+        if ($source) {
+            Write-Ok "Found the $($client.Name) in $source"
+        } else {
+            Write-Info 'Nothing on this PC matched every file, so pick the folder yourself.'
+            $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dialog.Description = "Select the folder of your own copy of $($game.Name) that has the $($client.Name) (a retail install, a backup or the disc). Subfolders are searched too."
+            $dialog.ShowNewFolderButton = $false
+            if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { Write-Info 'Import cancelled.'; return }
+            $source = $dialog.SelectedPath
+        }
+        $null = Install-GameClient -GameId $t.Game -ClientId $t.Client -ImportFolder $source }
     'steamversion' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $found = Find-CatalogGame -Game $game
         if (-not $found) { throw "$($game.Name) was not found." }
@@ -7368,6 +7492,17 @@ function Update-GamesPage {
         }
         if (-not $game.Available) { $line = & $text $game.UnavailableReason 'Yellow' 12; $line.Margin = '0,6,0,0'; $null = $panel.Children.Add($line) }
         elseif ($game.Note) { $line = & $text $game.Note 'TextMuted' 12; $line.Margin = '0,6,0,0'; $null = $panel.Children.Add($line) }
+        if ($found -and $game.Available) {
+            # Why a Play button is greyed out, in one line, instead of only in a tooltip.
+            $blocked = @(foreach ($mode in $game.Modes) {
+                $reason = Get-ModeBlocker -Game $game -Mode $mode -GameFolder $found.Folder
+                if ($reason) { "$($mode.Label): $reason" }
+            })
+            if ($blocked.Count -gt 0) {
+                $line = & $text ('Not ready: ' + ($blocked -join ' | ')) 'Yellow' 12
+                $line.Margin = '0,6,0,0'; $line.TextWrapping = 'Wrap'; $null = $panel.Children.Add($line)
+            }
+        }
 
         $buttons = New-Object System.Windows.Controls.WrapPanel
         if (-not $found -and ($game.ProjectUrl -or @($game.SteamAppIds).Count -gt 0)) {

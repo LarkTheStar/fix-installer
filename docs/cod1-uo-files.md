@@ -18,8 +18,10 @@ the executables and some of the game modules. The community clients need the ret
 | UO 1.51x | `coduo.dll`, `CoDUOMPx.exe` | `coduo.dll` is UOx built by this repository's CI ([build-uox.yml](../.github/workflows/build-uox.yml)) from [xtnded/codextended-client-uo](https://github.com/xtnded/codextended-client-uo) at commit `146bcb1`; `CoDUOMPx.exe` is made on the player's PC from their own 1.51 `CoDUOMP.exe` |
 
 The installer never downloads Activision's game files. Files marked "imported" are
-copied from a folder the player picks (an old retail install, a backup or the disc)
-when each one matches the size and CRC-32 below. Every replaced file is backed up and
+copied from the player's own copy (an old retail install, a backup or the disc) when
+each one matches the size and CRC-32 below. Import looks for them first - the game
+folder, disc drives and the usual Program Files and Steam library folders - and only
+asks for a folder when nothing on the PC matches every file. Every replaced file is backed up and
 put back by Remove, and **Use Steam version** removes every version at once.
 
 ## The exe patch
