@@ -1230,6 +1230,16 @@ Describe 'Game catalogue' {
         $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json
     }
 
+    It 'only gives a repair step to a game that declares one' {
+        # $null counts as one item in @(), so a card whose game has no Repair used to
+        # grow a Repair button whose action then had nothing to delete.
+        $withRepair = @($catalog | Where-Object { @(Get-CatalogRepairFiles -Game $_).Count -gt 0 })
+        $withRepair.Count | Should -Be 1
+        $withRepair[0].Id | Should -Be 'bo4'
+        ((Get-CatalogRepairFiles -Game (Get-CatalogGame -Id 'bo4')) -join ',') | Should -Be 'BlackOps4.start'
+        @(Get-CatalogRepairFiles -Game (Get-CatalogGame -Id 'cod4')).Count | Should -Be 0
+    }
+
     It 'has unique ids and every field the Games page needs' {
         @($catalog.Id | Select-Object -Unique).Count | Should -Be $catalog.Count
         foreach ($game in $catalog) {
@@ -1831,6 +1841,18 @@ Describe 'Game detection' {
         Remove-Item -LiteralPath (Join-Path $cod4 'iw3mp.exe')
         Find-CatalogGame -Game $game | Should -BeNullOrEmpty
         Test-CatalogGameFolder -Game $game -Folder $cod4 | Should -BeFalse
+    }
+
+    It 'does not mistake one game''s folder for another that ships the same library' {
+        # binkw32.dll is in the marker lists of CoD4, WaW, BO1, MW2 and MW3, so only the
+        # game's own executable may identify its folder.
+        Set-Content -LiteralPath (Join-Path $cod4 'binkw32.dll') -Value 'shared library'
+        foreach ($id in 'waw', 'bo1', 'mw2', 'mw3') {
+            $other = Get-CatalogGame -Id $id
+            Test-CatalogGameFolder -Game $other -Folder $cod4 | Should -BeFalse -Because $id
+            Find-CatalogGame -Game $other | Should -BeNullOrEmpty -Because $id
+        }
+        (Find-CatalogGame -Game $game).Folder | Should -Be ([IO.Path]::GetFullPath($cod4).TrimEnd('\'))
     }
 
     It 'finds a game in a library''s common folder when its own manifest is gone' {

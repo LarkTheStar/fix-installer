@@ -2965,8 +2965,20 @@ function Get-ClientAppDataRoot {
 function Test-CatalogGameFolder {
     param([Parameter(Mandatory)]$Game, [string]$Folder)
     if ([string]::IsNullOrWhiteSpace($Folder) -or -not (Test-Path -LiteralPath $Folder -PathType Container)) { return $false }
-    foreach ($file in $Game.ValidFiles) { if (Test-Path -LiteralPath (Join-Path $Folder $file) -PathType Leaf) { return $true } }
+    # Only the game's own executable can identify its folder: a library several games ship
+    # (binkw32.dll is in CoD4's, WaW's, BO1's, MW2's and MW3's lists) would otherwise make
+    # one game's folder count as another's. DLLs are used only when the game has no exe.
+    $markers = @($Game.ValidFiles | Where-Object { $_ -like '*.exe' })
+    if ($markers.Count -eq 0) { $markers = @($Game.ValidFiles) }
+    foreach ($file in $markers) { if (Test-Path -LiteralPath (Join-Path $Folder $file) -PathType Leaf) { return $true } }
     return $false
+}
+
+# The repair files a game declares, without the $null that a missing property gives: it
+# counts as one item in @(), which used to put a Repair button on every card.
+function Get-CatalogRepairFiles {
+    param([Parameter(Mandatory)]$Game)
+    return @($Game.Repair | Where-Object { $_ })
 }
 
 function Get-CatalogGameFolder {
@@ -7165,7 +7177,7 @@ $global:GameActionMap = @{
     'repair' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $found = Find-CatalogGame -Game $game
         if (-not $found) { throw "$($game.Name) was not found." }
-        foreach ($name in @($game.Repair)) {
+        foreach ($name in (Get-CatalogRepairFiles -Game $game)) {
             $file = Join-Path $found.Folder $name
             if (Test-Path -LiteralPath $file -PathType Leaf) { Remove-Item -LiteralPath $file -Force -ErrorAction Stop; Write-Ok "Deleted $name." } else { Write-Info "$name is not there; nothing to delete." }
         }
@@ -7322,7 +7334,8 @@ function Update-GamesPage {
                 $blocker = Get-ModeBlocker -Game $game -Mode $mode -GameFolder $found.Folder
                 $null = $buttons.Children.Add((& $button "Play: $($mode.Label)" @{ Action = 'play'; Game = $game.Id; Mode = $mode.Id } $blocker (-not $blocker)))
             }
-            if (@($game.Repair).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Repair' @{ Action = 'repair'; Game = $game.Id } ('Fixes a black screen at start: deletes ' + (@($game.Repair) -join ', ')))) }
+            $repairFiles = Get-CatalogRepairFiles -Game $game
+            if ($repairFiles.Count -gt 0) { $null = $buttons.Children.Add((& $button 'Repair' @{ Action = 'repair'; Game = $game.Id } ('Fixes a black screen at start: deletes ' + ($repairFiles -join ', ')))) }
         }
         if ($found -and $game.ExeCheck) { $null = $buttons.Children.Add((& $button 'Check game exe' @{ Action = 'exe'; Game = $game.Id } "Check your own $($game.ExeCheck.File)")) }
         if ($game.CdKey) { $null = $buttons.Children.Add((& $button 'CD key' @{ Action = 'cdkey'; Game = $game.Id } 'Your own CD key: view (masked), back up, set or restore')) }
