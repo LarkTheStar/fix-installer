@@ -27,6 +27,13 @@ powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\install.ps1
 
 No installation, no leftovers: the script is the program.
 
+Or use the exe: download `CodHQ-Setup.exe` from the
+[Releases](https://github.com/LarkTheStar/fix-installer/releases) page (the
+`app-v<version>` pre-releases) and double-click it. It is the same utility, with the
+script embedded in a small launcher. It is not code-signed yet, so Windows may show
+"Windows protected your PC" the first time: **More info** > **Run anyway**. How it is
+built and what comes next: [docs/exe-plan.md](docs/exe-plan.md).
+
 ## What it does
 
 | Page | Actions |
@@ -315,9 +322,17 @@ To test the hand-off with a second administrator account, run it from the normal
 account and type the other account's password at the UAC prompt. A real downgrade
 against real Steam still needs a manual run before a release.
 
+The sandbox also has fake Call of Duty / United Offensive, MWR and Black Ops 4 folders
+for the Games page. The full test plan for every game, including the checks only real
+games can do, is [docs/testing.md](docs/testing.md).
+
+`tests\Test-Exe.ps1` checks the exe built by `tools\Build-Exe.ps1` (version, icon, the
+embedded script, argument passing); with `-Launch` it also opens the real window from
+the exe in sandbox mode.
+
 ## Version
 
-`1.0.0` — the value lives in `$AppVersion` at the top of the script and is shown in the
+`1.1.0` — the value lives in `$AppVersion` at the top of the script and is shown in the
 sidebar.
 
 ## License
