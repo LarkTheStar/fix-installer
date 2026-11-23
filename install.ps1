@@ -2759,23 +2759,10 @@ function Get-PlutoniumClient {
 }
 
 function Get-GameCatalog {
+    # The Games page sorts these by Year, so the order below is only for reading.
     $cod4Deny = @('iw3mp.exe')
     $cod4Derive = @{ 'miles32.dll' = 'mss32.dll' }
     @(
-        # United Offensive and Call of Duty 2: cards only for now. They find the game and
-        # list it; a client can be added when there is one to place.
-        [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(2640); Detect = 'steam'
-            ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
-            NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @(); Modes = @()
-            Note = 'No client to install yet: the card finds the game and nothing else for now.'
-            Available = $true; UnavailableReason = '' }
-        [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
-            ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
-            NeedsElevation = $true; DpiFix = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @(); Modes = @()
-            Note = 'No client to install yet: the card finds the game and nothing else for now.'
-            Available = $true; UnavailableReason = '' }
         # Call of Duty (2003): the 1.1 singleplayer and multiplayer files, from this
         # project's own release, installed exactly as published.
         [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(2620); Detect = 'steam'
@@ -2790,6 +2777,20 @@ function Get-GameCatalog {
             # The 1.1 archive is the whole singleplayer and multiplayer file set, so a folder
             # the player picks or creates is enough: Install writes the game files there.
             AllowEmptyFolder = $true
+            Available = $true; UnavailableReason = '' }
+        # United Offensive and Call of Duty 2: cards only for now. They find the game and
+        # list it; a client can be added when there is one to place.
+        [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(2640); Detect = 'steam'
+            ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
+            NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(); Modes = @()
+            Note = 'No client to install yet: the card finds the game and nothing else for now.'
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
+            ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $true; DpiFix = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(); Modes = @()
+            Note = 'No client to install yet: the card finds the game and nothing else for now.'
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod4'; Name = 'Call of Duty 4: Modern Warfare'; Year = '2007'; SteamAppIds = @(7940); Detect = 'steam'
             ValidFiles = @('binkw32.dll', 'iw3mp.exe', 'iw3sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
@@ -7251,7 +7252,9 @@ function Update-GamesPage {
             Run-Action -Action $action -Arguments @($tag)
             Update-GamesPage })
         $b }
-    foreach ($game in Get-GameCatalog) {
+    # One card per game, in release order (oldest first), whatever order the catalogue
+    # entries happen to be written in.
+    foreach ($game in @(Get-GameCatalog | Sort-Object { [int]$_.Year })) {
         $found = $null
         try { $found = Find-CatalogGame -Game $game } catch { $found = $null }
         $card = New-Object System.Windows.Controls.Border
