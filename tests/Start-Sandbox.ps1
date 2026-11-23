@@ -41,7 +41,7 @@ function Write-SandboxFile {
 
 function Show-SandboxReport {
     Write-Output "Sandbox: $Path"
-    foreach ($part in 'Steam', 'Game', 'Battle.net', 'Own copy', 'Settings') {
+    foreach ($part in 'Steam', 'Game', 'Battle.net', 'Settings') {
         $root = Join-Path $Path $part
         Write-Output ''
         Write-Output "--- $part ---"
@@ -103,14 +103,10 @@ if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
     # Fake Steam installs of a few Games-page titles: each has its Steam app manifest
     # and the marker file the installer looks for (placeholder text, not the games).
     $fakeGames = @(
-        @{ AppId = 2630; Dir = 'Call of Duty 2'; Files = @('CoD2SP_s.exe', 'CoD2MP_s.exe', 'mss32.dll') }
         @{ AppId = 7940; Dir = 'Call of Duty 4'; Files = @('iw3mp.exe', 'iw3sp.exe', 'binkw32.dll', 'mss32.dll') }
         @{ AppId = 10180; Dir = 'Call of Duty Modern Warfare 2'; Files = @('iw4mp.exe', 'iw4sp.exe', 'binkw32.dll') }
         @{ AppId = 202970; Dir = 'Call of Duty Black Ops II'; Files = @('t6mp.exe', 't6zm.exe', 't6sp.exe', 'binkw32.dll') }
         @{ AppId = 209160; Dir = 'Call of Duty Ghosts'; Files = @('iw6mp64_ship.exe', 'iw6sp64_ship.exe') }
-        # Call of Duty and United Offensive share one folder on Steam, as on a real PC.
-        @{ AppId = 2620; Dir = 'Call of Duty'; Files = @('CoDSP.exe', 'CoDMP.exe', 'mss32.dll', 'Main\pak0.pk3', 'Main\game_mp_x86.dll') }
-        @{ AppId = 2640; Dir = 'Call of Duty'; Files = @('CoDUOSP.exe', 'CoDUOMP.exe', 'uo\pakuo00.pk3') }
         # Modern Warfare Remastered: H1-Mod and HorizonMW both use it.
         @{ AppId = 393080; Dir = 'Call of Duty Modern Warfare Remastered'; Files = @('h1_mp64_ship.exe', 'h1_sp64_ship.exe') }
     )
@@ -122,9 +118,6 @@ if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
     # folder with Change folder on its card. Its exe and LPC files are placeholders, so
     # Install shows the backup of both and Remove shows them put back.
     foreach ($file in 'BlackOps4.exe', 'Black Ops 4 Launcher.exe', 'LPC\core_ffotd_placeholder.ff') { Write-SandboxFile ("Battle.net\Call of Duty Black Ops 4\{0}" -f $file) "placeholder $file (sandbox)" }
-    # A stand-in for the player's own copy of the older games. Its files are
-    # placeholders, so Import lists every file it could not match (the real check).
-    Write-SandboxFile 'Own copy\Call of Duty\Main\pak0.pk3' 'placeholder, not the 1.1 pak0.pk3 (sandbox)'
 
     $null = New-Item -ItemType Directory -Path (Join-Path $Path 'Settings') -Force
     Write-Output "Sandbox created at $Path"

@@ -176,13 +176,6 @@ $clients = @(
        Evidence = { Get-Iw3xEvidence 'http://74.208.200.240/manifest.json' } }
     @{ Manifest = 'iw3sp-mod.json'; Deny = @{ 'miles32.dll' = $retailMiles + ', renamed' }; Derive = @{ 'miles32.dll' = 'mss32.dll' }
        Evidence = { Get-Sha1ManifestEvidence 'https://jerryalt.codeberg.page/files.json' 'iw3sp-mod files.json'; Get-ReleaseAssetEvidence 'callofduty4x/CoD4x-mss' '1.0.2'; Get-ReleaseAssetEvidence 'callofduty4x/CoD4x-launcher' '1.1.3' } }
-    @{ Manifest = 'cod2x.json'; Deny = @{ 'mss32_original.dll' = $retailMiles + ', renamed' }; Derive = @{ 'mss32_original.dll' = 'mss32.dll' }
-       Evidence = { Get-ZipEvidence 'https://github.com/callofduty2x/CoD2x/releases/download/v1.4.6.8/CoD2x_1.4.6.8_windows.zip' 'CoD2x v1.4.6.8' } }
-    @{ Manifest = 'cod1x.json'; Deny = @{ 'codmp.exe' = 'the game''s own executable (patched)' }
-       Evidence = { Get-ZipEvidence 'https://github.com/xtnded/codextended-client/releases/download/2697/CoD1x_Archive.zip' 'CoD1x 2697' } }
-    @{ Manifest = 'coduox.json'; Deny = @{ 'coduomp.exe' = 'the game''s own executable (patched)' }; Evidence = { } }
-    @{ Manifest = 'cod1.json'; Deny = @{ 'codmp.exe' = 'the game''s own executable' }; Evidence = { } }
-    @{ Manifest = 'coduo.json'; Deny = @{ 'coduomp.exe' = 'the game''s own executable' }; Evidence = { } }
     @{ Manifest = 'cod4x.json'; Deny = @{ 'iw3mp.exe' = 'the game''s own executable'; 'miles32.dll' = $retailMiles + ', renamed' }
        Evidence = { Get-ReleaseAssetEvidence 'callofduty4x/CoD4x_Client_pub' '21.8'; Get-ReleaseAssetEvidence 'callofduty4x/CoD4x-mss' '1.0.2'; Get-ReleaseAssetEvidence 'callofduty4x/CoD4x-launcher' '1.1.3' } }
     @{ Manifest = 't6.json'; Evidence = { Get-FileEvidence 'https://cdn.plutonium.pw/updater/plutonium.exe' 'plutonium.exe (cdn.plutonium.pw)'; Get-ReleaseAssetEvidence 'Rattpak/T6SP-Mod-Release' 'v1.0.0-Beta' } }

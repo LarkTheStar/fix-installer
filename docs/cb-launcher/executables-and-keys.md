@@ -29,24 +29,18 @@ Written by `game_commands.cpp` before launch, only when no key is present yet:
 
 | Game | Registry location written | Value name(s) | Also checked |
 | --- | --- | --- | --- |
-| Call of Duty 2 | `HKCU\SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty 2` | `codkey` | `HKLM\SOFTWARE\Activision\Call of Duty 2` (32-bit view): a retail key there is never shadowed |
-| United Offensive | `HKCU\SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty United Offensive` | `key`, `codkey` | `HKLM\SOFTWARE\Activision\Call of Duty United Offensive` (32-bit view) |
 | Call of Duty 4 | `HKCU\SOFTWARE\Activision\Call of Duty 4` | `codkey` | none |
 
-Why the VirtualStore path: CoD2 and UO read the 32-bit `HKLM` key. A non-elevated
-write to `HKLM` lands in the per-user VirtualStore anyway, so CB writes there directly.
-An elevated CoD2x run migrates the value to the real `HKLM` key.
 
 Format: each stored value is 20 characters, uppercase letters and digits, no dashes
 (the key as Steam shows it, with the dashes removed).
 
-Other registry work before launch: CoD1, UO and CoD2 get `HIGHDPIAWARE` added under
-`HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers` for their
-executable; BO4 gets an empty `HKCU\SOFTWARE\Blizzard Entertainment\Battle.net` key.
+Other registry work before launch: BO4 gets an empty
+`HKCU\SOFTWARE\Blizzard Entertainment\Battle.net` key.
 
 **This installer:** the **CD key** button inspects the current value (masked to its last
 4 characters), backs it up to a `.reg` file, writes the key the player types (their own
 key, from Steam's **CD Key** entry for the game; checked for 20 letters and digits after
 removing dashes; read back to confirm), and restores a backup. It writes the same
-locations as above, never overwrites a retail `HKLM` key, and never logs a key. It
+location as above and never logs a key. It
 contains no keys of its own.

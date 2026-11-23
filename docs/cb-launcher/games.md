@@ -9,9 +9,6 @@ its status comes from [manifests.md](manifests.md).
 
 | Game | CB id | Steam app ID | Files that mark a valid folder | Clients (installer status) |
 | --- | --- | --- | --- | --- |
-| Call of Duty (2003) | `cod1` | 2620 | `CoDSP.exe`, `CoDMP.exe` | Steam version as it is; 1.1 (files imported from the player's own copy) and 1.1x (CoD1x's official release); optional retail 1.5 files (see [../cod1-uo-files.md](../cod1-uo-files.md)) |
-| United Offensive | `coduo` | 2640 | `CoDUOSP.exe`, `CoDUOMP.exe` | Steam version as it is; 1.51 (files imported from the player's own copy) and 1.51x (UOx built from source, exe copy made from the player's 1.51 exe) |
-| Call of Duty 2 | `cod2x` | 2630 | `CoD2SP_s.exe`, `CoD2MP_s.exe` | CoD2x (MP). Needs administrator rights |
 | Call of Duty 4 | `cod4x` | 7940 | `binkw32.dll`, `iw3mp.exe`, `iw3sp.exe` | iw3x (MP, CB's default), CoD4x (MP), IW3SP-Mod (campaign) |
 | World at War | `t4` | 10090 | `binkw32.dll`, `CoDWaW.exe`, `CoDWaWmp.exe` | Plutonium |
 | Modern Warfare 2 | `iw4x` | 10180 | `binkw32.dll`, `iw4mp.exe`, `iw4sp.exe` | IW4x (MP), AlterWare (campaign, Spec Ops) |
@@ -37,9 +34,6 @@ name argument when it has one.
 
 | Game | Mode | Executable (game folder unless noted) | Arguments |
 | --- | --- | --- | --- |
-| CoD1 | SP / MP | `CoDSP.exe` / `CoDMP.exe` | `+set com_hunkmegs 512 +set r_lodbias -1000` `+set name <name>` |
-| UO | SP / MP | `CoDUOSP.exe` / `CoDUOMP.exe` | `+set com_hunkmegs 512 +set r_lodbias -1000` `+set name <name>` |
-| CoD2 | SP / MP | `CoD2SP_s.exe` / `CoD2MP_s.exe` (elevated) | `+set name <name>` |
 | CoD4 | MP | `iw3mp.exe` (with iw3x or CoD4x installed) | `+set name <name>` |
 | CoD4 | SP | `iw3sp_mod.exe` | `+set iw3sp_auto_update 0` `+set name <name>` |
 | WaW | SP / MP / ZM | `%LOCALAPPDATA%\Plutonium\bin\plutonium-launcher-win32.exe` | `plutonium://play/t4sp` / `t4mp` / `t4sp` |
@@ -67,7 +61,7 @@ Optional CB launch flags the installer does not turn on by default: BO3 `-nointr
 | --- | --- | --- |
 | iw3x, CoD4x | files marked `game` in the manifest | files marked `appdata` → `%LOCALAPPDATA%\CallofDuty4MW` |
 | IW3SP-Mod | `iw3sp_data\`, the exe and DLLs | `bin\launcher.dll` → `%LOCALAPPDATA%\CallofDuty4MW` |
-| IW4x, IW6x, S1x, CoD2x, Plutonium bootstrapper, AlterWare, T6SP-Mod | everything | none |
+| IW4x, IW6x, S1x, Plutonium bootstrapper, AlterWare, T6SP-Mod | everything | none |
 | BOIII | `boiii.exe` | `data\` → `%LOCALAPPDATA%\boiii` |
 | H1-Mod (CB's build or AuroraMod's own release) | `h1-mod.exe` | `cdata\` → `%LOCALAPPDATA%\h1-mod` |
 | IW7-Mod | `iw7-mod.exe` | `cdata\` → `%LOCALAPPDATA%\auroramod\iw7-mod` |

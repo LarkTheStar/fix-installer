@@ -7,9 +7,6 @@ keeps the catalogue in line with this table.
 
 | CB card | CB shows | Games page clients (catalogue ids) | Match |
 | --- | --- | --- | --- |
-| Call of Duty | COD1 V1.1 / COD1.1X | CoD 1.1 files (`cod1-v11`), CoD1x (`cod1x`); also Steam's version and retail 1.5 (`cod1-v15`) | yes, plus Steam and 1.5 |
-| United Offensive | CODUO V1.51 / CODUO1.51X | UO 1.51 files (`coduo-v151`), UOx (`uox`); also Steam's version | yes, plus Steam |
-| Call of Duty 2 | COD2X | CoD2x (`cod2x`) | yes |
 | Modern Warfare | IW3X / COD4X / IW3SP-MOD | iw3x, CoD4x, IW3SP-Mod | yes |
 | World at War | T4 | Plutonium (t4sp, t4mp) | yes |
 | Modern Warfare 2 | IW4X / IW4-SP | IW4x; the campaign through AlterWare's `iw4x-sp` | yes |
@@ -30,8 +27,6 @@ keeps the catalogue in line with this table.
 
 The clients are the same, but some files reach the player differently from CB:
 
-- CB delivers the CoD1 1.1 and UO 1.51 game files itself. Here they are imported from
-  the player's own copy ([cod1-uo-files.md](cod1-uo-files.md)).
 - CB delivers Project BO4's executable and LPC data. Here Shield's own launcher
   fetches them.
 - CB delivers HorizonMW's content. Here HorizonMW's own launcher does.

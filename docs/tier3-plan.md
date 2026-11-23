@@ -26,7 +26,6 @@ CB's `/v1/servers` sits behind its own service.
 
 | Game | Source |
 | --- | --- |
-| CoD1, UO, CoD2 | the games' master servers (Quake 3 `getservers` over UDP), then `getstatus` to each server |
 | CoD4 (CoD4x / iw3x) | the CoD4x master server, then `getstatus` |
 | WaW, BO1, BO2, MW3 MP | Plutonium's public server list |
 | MW2 (IW4x), Ghosts, AW, BO3, IW, MWR, MW2CR (X Labs / AlterWare / Aurora clients) | each project's master server or JSON server list |
