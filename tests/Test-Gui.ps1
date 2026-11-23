@@ -141,7 +141,7 @@ try {
             # The cards are built from the catalogue when the page first opens; detection
             # only reads the Steam libraries, so this touches nothing.
             $cardTitles = { @($window.FindAll($TS::Descendants, [System.Windows.Automation.PropertyCondition]::new($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)) | ForEach-Object { $_.Current.Name } | Where-Object { $_ -like 'Call of Duty*(*)' -or $_ -like 'HorizonMW*(*)' }) }
-            Check 'the Games page shows a card for every catalogue game' (Wait-Until -Seconds 20 { (& $cardTitles).Count -ge 15 })
+            Check 'the Games page shows a card for every catalogue game' (Wait-Until -Seconds 20 { (& $cardTitles).Count -ge 17 })
             Check 'the Games page has its player name box' ($null -ne (Find-ById $window 'PlayerNameBox'))
         }
     }

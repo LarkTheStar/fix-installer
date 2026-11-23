@@ -105,15 +105,17 @@ same commit; until then the utility refuses the new file.
 
 ## Games
 
-The **Games** page lists 15 older titles: Call of Duty (2003), CoD4, World at War,
-MW2, Black Ops, MW3, Black Ops II, Ghosts, Advanced Warfare, Black Ops III, Infinite
-Warfare, Modern Warfare Remastered, MW2 Campaign Remastered, Black Ops 4 and
-HorizonMW. It finds each game in your Steam libraries (or the folder you pick)
+The **Games** page lists 17 older titles: Call of Duty (2003), United Offensive, Call
+of Duty 2, CoD4, World at War, MW2, Black Ops, MW3, Black Ops II, Ghosts, Advanced
+Warfare, Black Ops III, Infinite Warfare, Modern Warfare Remastered, MW2 Campaign
+Remastered, Black Ops 4 and HorizonMW. It finds each game in your Steam libraries (or
+the folder you pick)
 and installs the community client that brings it back online:
 
 | Clients | Games |
 | --- | --- |
 | 1.1 singleplayer and multiplayer files (this project's release) | Call of Duty (2003) |
+| Nothing yet: the cards only find United Offensive and Call of Duty 2 | United Offensive, Call of Duty 2 |
 | Plutonium | World at War, Black Ops, Black Ops II (MP, Zombies), MW3 (MP) |
 | IW4x, AlterWare | MW2 (MP; campaign and Spec Ops), MW3 (campaign, Spec Ops) |
 | iw3x or CoD4x, IW3SP-Mod | CoD4 (MP; campaign) |

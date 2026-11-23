@@ -1257,6 +1257,19 @@ Describe 'Game catalogue' {
         }
     }
 
+    It 'has cards for United Offensive and Call of Duty 2 with nothing to install yet' {
+        foreach ($id in 'coduo', 'cod2') {
+            $game = Get-CatalogGame -Id $id
+            $game | Should -Not -BeNullOrEmpty -Because $id
+            $game.Available | Should -BeTrue -Because $id
+            @($game.SteamAppIds).Count | Should -BeGreaterThan 0 -Because $id
+            @($game.ValidFiles | Where-Object { $_ -like '*.exe' }).Count | Should -Be 2 -Because $id
+            @($game.Clients).Count | Should -Be 0 -Because $id
+            @($game.Modes).Count | Should -Be 0 -Because $id
+            $game.Note | Should -Not -BeNullOrEmpty -Because $id
+        }
+    }
+
     It 'matches every client the CB launcher shows on its cards' {
         # docs/cb-comparison.md: CB's card labels and the catalogue ids that cover them.
         $cbCards = [ordered]@{
@@ -1571,6 +1584,42 @@ Describe 'Call of Duty 1.1 archive client' {
         # Every other game still needs its own files before its folder is accepted.
         $game.AllowEmptyFolder | Should -BeTrue
         (Get-CatalogGame -Id 'cod4').AllowEmptyFolder | Should -BeNullOrEmpty
+    }
+
+    It 'asks before writing into a folder that is not empty and has no game files' {
+        $busy = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-busy-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $busy 'notes.txt') -Value 'my stuff'
+        Mock Read-Host { 'n' }
+        { Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $busy -RetryDelaySeconds 0 } | Should -Throw
+        Get-Text (Join-Path $busy 'notes.txt') | Should -Be 'my stuff'
+        Test-Path -LiteralPath (Join-Path $busy 'CoDMP.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $busy -ClientId 'cod1-v11') | Should -BeFalse
+        Mock Read-Host { 'y' }
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $busy -RetryDelaySeconds 0
+        Get-Text (Join-Path $busy 'notes.txt') | Should -Be 'my stuff'
+        Get-Text (Join-Path $busy 'CoDMP.exe') | Should -Be '1.1 mp'
+        Get-Text (Join-Path $busy 'CoDSP.exe') | Should -Be '1.1 sp'
+    }
+
+    It 'fails with a clear message and changes nothing when the archive has no game executables' {
+        Remove-Item -LiteralPath $global:cod1Archive -Force -ErrorAction SilentlyContinue
+        New-TestZip -Path $global:cod1Archive -Entries ([ordered]@{ 'Call of Duty/main/pak0.pk3' = 'data' })
+        { Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw '*did not put CoDSP.exe and CoDMP.exe*'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'main') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11') | Should -BeFalse
+    }
+
+    It 'keeps the player''s own files across a second install of a different archive' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $second = (Get-CatalogGame -Id 'cod1').Clients[0].PSObject.Copy()
+        $second.Archive = @{ Url = 'https://example.com/changed.zip'; Size = 1; Sha256 = ('C' * 64) }
+        $null = Install-GameClientArchive -Game (Get-CatalogGame -Id 'cod1') -Client $second -GameFolder $cod1Folder -RetryDelaySeconds 0
+        @((Read-ClientRecord -GameFolder $cod1Folder -ClientId 'cod1-v11').Backups).Count | Should -Be 2
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
     }
 
     It 'reports a different archive as an update' {

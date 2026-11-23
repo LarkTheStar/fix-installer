@@ -11,7 +11,7 @@ prove a client actually starts and joins a server.
 | Pester, Windows PowerShell 5.1 | `powershell -NoProfile -ExecutionPolicy Bypass -File tests\Invoke-Tests.ps1` | every install / update / remove path, release archives, launcher cleanup, CD keys, update checks |
 | Pester, PowerShell 7 | `pwsh -NoProfile -File tests\Invoke-Tests.ps1` | the same |
 | Window layout | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Test-Xaml.ps1` | every control the script uses exists |
-| Real window | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Test-Gui.ps1` | every page opens, all 15 game cards appear, the admin hand-off works |
+| Real window | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Test-Gui.ps1` | every page opens, all 17 game cards appear, the admin hand-off works |
 | Sandbox | `powershell -NoProfile -ExecutionPolicy Bypass -File tests\Start-Sandbox.ps1 -Reset` | the real window against fake Steam, CoD4, MW2, BO2, Ghosts, MWR and BO4 folders, with real downloads |
 
 In the sandbox window, for each fake game:
@@ -59,6 +59,10 @@ Order, from the least to the most involved:
 | 8 | Black Ops III | BOIII | **Check game exe** first; Play starts BOIII |
 | 9 | Black Ops 4 | Project BO4 (Shield) | Install takes a while (about 2.2 GB through Shield's launcher); Play Online and Play Offline open Shield's launcher with your name in `project-bo4.json`; press Play Client; **Repair** if the screen stays black; Remove puts your `BlackOps4.exe` and LPC back; Battle.net Scan and Repair clean |
 | 10 | HorizonMW | HMW Launcher | Install opens the HMW Launcher: paste the MWR folder (on the clipboard), Verify game files; then **Play** on the card; Remove asks before deleting what the launcher added |
+
+United Offensive and Call of Duty 2 have cards that only find the game for now: there
+is no client to install yet, so checking the card says **Game found** with the right
+folder is all they can do. Add them to the table above once they have clients.
 
 ## When something fails
 

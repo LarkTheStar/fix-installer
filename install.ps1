@@ -2762,6 +2762,20 @@ function Get-GameCatalog {
     $cod4Deny = @('iw3mp.exe')
     $cod4Derive = @{ 'miles32.dll' = 'mss32.dll' }
     @(
+        # United Offensive and Call of Duty 2: cards only for now. They find the game and
+        # list it; a client can be added when there is one to place.
+        [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(2640); Detect = 'steam'
+            ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
+            NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(); Modes = @()
+            Note = 'No client to install yet: the card finds the game and nothing else for now.'
+            Available = $true; UnavailableReason = '' }
+        [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
+            ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
+            NeedsElevation = $true; DpiFix = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @(); Modes = @()
+            Note = 'No client to install yet: the card finds the game and nothing else for now.'
+            Available = $true; UnavailableReason = '' }
         # Call of Duty (2003): the 1.1 singleplayer and multiplayer files, from this
         # project's own release, installed exactly as published.
         [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(2620); Detect = 'steam'
@@ -3391,6 +3405,8 @@ function Install-GameClientArchive {
     $null = New-Item -ItemType Directory -Path $stage -Force
     $zipPath = Join-Path $stage (([string]$archive.Url -split '/')[-1])
     $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $Client.Id
+    # One folder per run, so a backup this client already holds is never written over.
+    $runBackup = Join-Path $backupRoot ('run-' + [guid]::NewGuid().ToString('N'))
     $journal = [System.Collections.Generic.List[object]]::new()
     try {
         Write-Info "Downloading $($Client.Name): $(([string]$archive.Url -split '/')[-1])"
@@ -3398,10 +3414,11 @@ function Install-GameClientArchive {
         $root = Get-GameArchiveRoot -ZipPath $zipPath
         if ($root) { Write-Info "The archive keeps its files in '$root\'; they are copied in without it." }
         Write-Info "Copying $($Client.Name) into $GameFolder ..."
-        Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $backupRoot -StripPrefix $root
+        Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $runBackup -StripPrefix $root
     } catch {
         Write-Warn "Installing $($Client.Name) failed; putting back what was changed..."
-        $null = Undo-ZipExtraction -Journal $journal
+        $undone = Undo-ZipExtraction -Journal $journal
+        if ($undone -and (Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
         throw
     } finally {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
@@ -3409,6 +3426,8 @@ function Install-GameClientArchive {
 
     $backups = [System.Collections.Generic.List[object]]::new()
     if ($previous) { foreach ($b in @($previous.Backups)) { $backups.Add([pscustomobject]@{ Target = [string]$b.Target; Backup = [string]$b.Backup }) } }
+    $previousFiles = @{}
+    if ($previous) { foreach ($f in @($previous.Files)) { $previousFiles[([string]$f.Target).ToLowerInvariant()] = $true } }
     $files = [System.Collections.Generic.List[object]]::new()
     $createdDirs = [System.Collections.Generic.List[string]]::new()
     if ($previous) { foreach ($d in @($previous.CreatedDirs)) { $createdDirs.Add([string]$d) } }
@@ -3418,12 +3437,25 @@ function Install-GameClientArchive {
         if ($change.Kind -eq 'Replaced') {
             # What Expand-ZipOverwrite moved aside is the file the previous install wrote;
             # the player's own original is already in this client's record. Keep that one.
+            # A file this client wrote last time is not the player's: no backup is kept for it.
             $earlier = @($backups | Where-Object { $_.Target -ieq $full }) | Select-Object -First 1
-            if ($earlier) { Remove-Item -LiteralPath ([string]$change.Backup) -Force -ErrorAction SilentlyContinue }
+            if ($earlier -or $previousFiles.ContainsKey($full.ToLowerInvariant())) { Remove-Item -LiteralPath ([string]$change.Backup) -Force -ErrorAction SilentlyContinue }
             else { $backups.Add([pscustomobject]@{ Target = $full; Backup = [string]$change.Backup }) }
         }
         $files.Add([pscustomobject]@{ Path = $full.Substring($GameFolder.Length + 1); Dest = 'game'; Target = $full
             Size = (Get-Item -LiteralPath $full).Length; Sha1 = (Get-FileSha1Hex $full); Sha256 = (Get-FileSha256 -Path $full); Derived = $false; Kind = 'archive' })
+    }
+
+    # The archive has to be the game's own file set: every marker file must have been
+    # written by it. Anything else means the wrong ZIP or a different layout, so the
+    # extraction is undone and nothing is installed.
+    $writtenPaths = @{}
+    foreach ($file in $files) { $writtenPaths[([string]$file.Path).ToLowerInvariant()] = $true }
+    $missing = @($Game.ValidFiles | Where-Object { -not $writtenPaths.ContainsKey($_.ToLowerInvariant()) })
+    if ($missing.Count -gt 0) {
+        $undone = Undo-ZipExtraction -Journal $journal
+        if ($undone -and (Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
+        throw "The archive did not put $(($missing -join ' and ')) in $GameFolder, so it is not the $($Game.Name) file set. Nothing was installed: the folder is as it was. Check that the ZIP you published contains $($Game.ValidFiles -join ' and ') at its top level, or inside one folder."
     }
 
     # Files the previous install wrote that this archive no longer has: put the original
@@ -3450,6 +3482,7 @@ function Install-GameClientArchive {
         InstalledAt = [DateTime]::UtcNow.ToString('o'); GameFolder = $GameFolder
         Files = @($files.ToArray()); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs | Select-Object -Unique); ExpectedGameFiles = @()
         Snapshot = @() })
+    if ((Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
     Write-Ok "$($Client.Name) is installed for $($Game.Name)."
     Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Files copied from the archive: {0}. Your own game files kept: {1}.', $files.Count, $backups.Count))
     return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = $files.Count; Current = 0; Derived = 0; Kept = $backups.Count; Skipped = 0 }
@@ -3470,6 +3503,13 @@ function Install-GameClient {
         # folder the player picked or created; every other game must already be there.
         if (-not $game.AllowEmptyFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
         if (-not (Test-Path -LiteralPath $GameFolder -PathType Container)) { $null = New-Item -ItemType Directory -Path $GameFolder -Force }
+        # An empty (or new) folder is taken as it is. A folder that already holds files but
+        # nothing of this game is only written into after the player says yes.
+        $occupied = @(Get-ChildItem -LiteralPath $GameFolder -Force -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0
+        if ($occupied -and -not (Test-SandboxMode)) {
+            Write-Warn "$GameFolder already has files in it, but none of them is $($game.Name) ($($game.ValidFiles -join ', '))."
+            if ((Read-Host "Install $($client.Name) downloads the archive into that folder and may replace files with the same names. Continue? [y/N]") -notmatch '^(y|yes)$') { Stop-Cancelled 'Nothing was installed.' }
+        }
         Write-Info "$GameFolder does not have $($game.Name) yet; $($client.Name) puts its files there."
     }
     foreach ($other in @($client.Conflicts)) {
