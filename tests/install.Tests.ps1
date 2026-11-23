@@ -1275,6 +1275,22 @@ Describe 'Game catalogue' {
         }
     }
 
+    It 'matches every client the CB launcher shows on its cards' {
+        # docs/cb-comparison.md: CB's card labels and the catalogue ids that cover them.
+        $cbCards = [ordered]@{
+            cod1 = @('cod1-v11', 'cod1x'); coduo = @('coduo-v151', 'uox'); cod2 = @('cod2x'); cod4 = @('iw3x', 'cod4x', 'iw3sp-mod')
+            waw = @('plutonium'); mw2 = @('iw4x'); bo1 = @('plutonium'); mw3 = @('plutonium', 'alterware'); bo2 = @('plutonium', 't6sp-mod')
+            ghosts = @('iw6x'); aw = @('s1x'); bo3 = @('boiii'); iw = @('iw7-mod'); mwr = @('h1-mod'); bo4 = @('shield'); mw2cr = @('h2-mod'); hmw = @('hmw-launcher')
+        }
+        foreach ($id in $cbCards.Keys) {
+            $game = $catalog | Where-Object { $_.Id -eq $id }
+            $game | Should -Not -BeNullOrEmpty -Because $id
+            $game.Available | Should -BeTrue -Because $id
+            foreach ($client in $cbCards[$id]) { @($game.Clients.Id) | Should -Contain $client -Because "CB shows it on the $id card" }
+            @($game.Modes).Count | Should -BeGreaterThan 0 -Because $id
+        }
+    }
+
     It 'names every client a mode requires or excludes' {
         $all = @($catalog.Clients | ForEach-Object { $_.Id })
         foreach ($game in $catalog) {
@@ -1964,5 +1980,42 @@ Describe 'Call of Duty 1.1 CD key file' -Skip:([bool]$IsLinux -or [bool]$IsMacOS
         $backup = @(Get-GameCdKeyBackupList -GameId 'cod1')[0]
         Restore-GameCdKey -GameId 'cod1' -BackupFile $backup.FullName
         Get-Text (Join-Path $folder 'Main\codkey') | Should -Be 'OLDKEY'
+    }
+}
+
+Describe 'Automatic client updates' {
+    BeforeEach {
+        $global:GameUpdateCounts = @{}
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('ghosts-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Mock Find-CatalogGame { [pscustomobject]@{ Folder = $folder; Source = 'saved' } } -ParameterFilter { $Game.Id -eq 'ghosts' }
+        Mock Find-CatalogGame { $null } -ParameterFilter { $Game.Id -ne 'ghosts' }
+        Mock Test-GameClientInstalled { $true }
+        Mock Write-Host { }
+        Mock Update-GameClient { [pscustomobject]@{ Downloaded = 1 } }
+    }
+
+    It 'updates only the installed clients that have something new' {
+        Mock Get-GameClientUpdateCount { 2 }
+        $result = Invoke-ClientAutoUpdate
+        $result.Checked | Should -Be 1
+        $result.Updated | Should -Be 1
+        Should -Invoke Update-GameClient -Times 1 -ParameterFilter { $GameId -eq 'ghosts' -and $ClientId -eq 'iw6x' }
+        $global:GameUpdateCounts['ghosts|iw6x'] | Should -Be 0
+    }
+
+    It 'leaves up-to-date clients alone and carries on when a check fails' {
+        Mock Get-GameClientUpdateCount { 0 }
+        (Invoke-ClientAutoUpdate -GameId 'ghosts').Updated | Should -Be 0
+        Should -Invoke Update-GameClient -Times 0
+        Mock Get-GameClientUpdateCount { throw 'offline' }
+        Mock Write-Warn { }
+        { Invoke-ClientAutoUpdate -GameId 'ghosts' } | Should -Not -Throw
+        Should -Invoke Write-Warn -ParameterFilter { $Message -like '*offline*' }
+    }
+
+    It 'only checks the clients a mode uses when asked to' {
+        Mock Get-GameClientUpdateCount { 1 }
+        (Invoke-ClientAutoUpdate -GameId 'ghosts' -ClientIds @('someone-else')).Checked | Should -Be 0
+        Should -Invoke Update-GameClient -Times 0
     }
 }

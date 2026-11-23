@@ -17,7 +17,7 @@ param(
 # ==========================================
 # VERSION
 # ==========================================
-$AppVersion = '1.0.0'
+$AppVersion = '1.1.0'
 # Also exposed globally: the diagnostics header is built from a handler, and a
 # global survives any scope the handler ends up running in.
 $global:AppVersion = $AppVersion
@@ -450,6 +450,8 @@ function New-DefaultSettings {
         # player name passed to the clients that take one.
         Games = [pscustomobject]@{}
         PlayerName = ''
+        # Games page: check and install client updates when the page opens and before Play.
+        AutoUpdateClients = $false
         SavedAt = ''
         AppId = $AppId
     }
@@ -460,7 +462,7 @@ function Get-AppSettings {
     try {
         if (Test-Path -LiteralPath $SettingsFile -PathType Leaf) {
             $saved = Get-Content -LiteralPath $SettingsFile -Raw | ConvertFrom-Json
-            foreach ($name in @('GameFolder', 'Theme', 'Accent', 'ReduceMotion', 'WindowWidth', 'WindowHeight', 'WindowLeft', 'WindowTop', 'WindowMaximized', 'LastPage', 'Games', 'PlayerName')) {
+            foreach ($name in @('GameFolder', 'Theme', 'Accent', 'ReduceMotion', 'WindowWidth', 'WindowHeight', 'WindowLeft', 'WindowTop', 'WindowMaximized', 'LastPage', 'Games', 'PlayerName', 'AutoUpdateClients')) {
                 $property = $saved.PSObject.Properties[$name]
                 if ($null -ne $property -and $null -ne $property.Value) { $settings.$name = $property.Value }
             }
@@ -833,7 +835,7 @@ function Receive-DownloadAttempt {
                 $downloadedMB = [Math]::Round($downloaded / 1MB, 1)
                 $totalMB = [Math]::Round($total / 1MB, 1)
                 if ($percent -ne $lastPercent) { Write-Progress -Activity $Label -Status "$downloadedMB MB of $totalMB MB ($percent%)" -PercentComplete $percent; $lastPercent = $percent }
-            } else { Write-Progress -Activity $Label -Status ("Downloaded {0:N1} MB" -f ($downloaded / 1MB)) -PercentComplete 0 }
+            } else { Write-Progress -Activity $Label -Status ([string]::Format([cultureinfo]::InvariantCulture, 'Downloaded {0:N1} MB', ($downloaded / 1MB))) -PercentComplete 0 }
         }
         $outputStream.Flush()
         # A dropped connection ends the read loop quietly, so check the size here;
@@ -883,7 +885,7 @@ function Invoke-ResumableDownload {
         } catch {
             if ($_.Exception.Data['NoRetry'] -eq $true) { throw }
             if ($attempt -ge $MaxAttempts) { throw }
-            Write-Warn ("Download interrupted ({0}). Trying again ({1} of {2}), continuing from the {3:N1} MB already received..." -f $_.Exception.Message, ($attempt + 1), $MaxAttempts, ($(if (Test-Path -LiteralPath $Destination -PathType Leaf) { (Get-Item -LiteralPath $Destination).Length } else { 0 }) / 1MB))
+            Write-Warn ([string]::Format([cultureinfo]::InvariantCulture, 'Download interrupted ({0}). Trying again ({1} of {2}), continuing from the {3:N1} MB already received...', $_.Exception.Message, ($attempt + 1), $MaxAttempts, ($(if (Test-Path -LiteralPath $Destination -PathType Leaf) { (Get-Item -LiteralPath $Destination).Length } else { 0 }) / 1MB)))
             $retryAfter = $_.Exception.Data['RetryAfter']
             if ($null -ne $retryAfter) { Start-Sleep -Seconds ([int]$retryAfter) }
             elseif ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds ($RetryDelaySeconds * $attempt) }
@@ -965,7 +967,7 @@ function Download-FileWithProgress {
         $expected = Get-ExpectedDownloadHash -Url $Url
         $downloaded = Invoke-ResumableDownload -Url $Url -Destination $Destination -Label $Label -ExpectedSha256 $expected -RetryDelaySeconds $RetryDelaySeconds
         Write-Progress -Activity $Label -Completed
-        Write-Ok ("Download complete: {0:N1} MB" -f ($downloaded / 1MB))
+        Write-Ok ([string]::Format([cultureinfo]::InvariantCulture, 'Download complete: {0:N1} MB', ($downloaded / 1MB)))
         if ($expected) { Write-Ok 'Checksum verified: the file matches the published release.' }
     } catch {
         Write-Progress -Activity $Label -Completed
@@ -1336,7 +1338,7 @@ function Download-LanguageArchive {
         foreach ($partPath in $localAssets) { $partStream = [IO.File]::OpenRead($partPath); try { $partStream.CopyTo($out) } finally { $partStream.Dispose() } }
         $out.Flush()
     } finally { $out.Dispose() }
-    Write-Ok ("Reassembled {0} from {1} ordered parts ({2:N2} GiB)." -f $Pack.File, $localAssets.Count, ((Get-Item -LiteralPath $assembled).Length / 1GB))
+    Write-Ok ([string]::Format([cultureinfo]::InvariantCulture, 'Reassembled {0} from {1} ordered parts ({2:N2} GiB).', $Pack.File, $localAssets.Count, ((Get-Item -LiteralPath $assembled).Length / 1GB)))
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $testArchive = $null
@@ -4122,7 +4124,7 @@ function Start-CatalogGame {
     $blocker = Get-ModeBlocker -Game $game -Mode $mode -GameFolder $GameFolder
     if ($blocker) { throw $blocker }
     $build = Get-GameBuildInfo -Game $game -GameFolder $GameFolder
-    if ($build.Executable) { Write-Info ("Game build: {0} version {1}, {2:N0} bytes." -f $build.Executable, $(if ($build.Version) { $build.Version } else { 'unknown' }), $build.Size) }
+    if ($build.Executable) { Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Game build: {0} version {1}, {2:N0} bytes.', $build.Executable, $(if ($build.Version) { $build.Version } else { 'unknown' }), $build.Size)) }
     foreach ($m in $build.Mismatches) {
         Write-Warn "$($m.Client) was installed against a different $($m.Path) (expected SHA-1 $($m.Expected), found $($m.Found)). If the game does not start, verify the game files in Steam."
     }
@@ -4155,6 +4157,69 @@ function Start-CatalogGame {
 }
 
 # ==========================================
+# GAMES: AUTOMATIC UPDATES
+# ==========================================
+# Checks the given installed clients (all of them when none are named) and updates
+# the ones whose source has something new. Imported game files never change, so they
+# are skipped. One client failing does not stop the others.
+function Invoke-ClientAutoUpdate {
+    param([string]$GameId = '', [string[]]$ClientIds = @())
+    $updated = 0; $checked = 0
+    if ($null -eq $global:GameUpdateCounts) { $global:GameUpdateCounts = @{} }
+    foreach ($game in Get-GameCatalog) {
+        if ($GameId -and $game.Id -ne $GameId) { continue }
+        $found = $null
+        try { $found = Find-CatalogGame -Game $game } catch { $found = $null }
+        if (-not $found) { continue }
+        foreach ($client in $game.Clients) {
+            if ($client.Source -eq 'import') { continue }
+            if (@($ClientIds).Count -gt 0 -and @($ClientIds) -notcontains $client.Id) { continue }
+            if (-not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id)) { continue }
+            $checked++
+            try {
+                $count = Get-GameClientUpdateCount -Client $client -GameFolder $found.Folder
+                $global:GameUpdateCounts[$game.Id + '|' + $client.Id] = $count
+                if ($count -le 0) { continue }
+                Write-Info "$($game.Name) - $($client.Name): an update is available; installing it."
+                $null = Update-GameClient -GameId $game.Id -ClientId $client.Id -GameFolder $found.Folder
+                $global:GameUpdateCounts[$game.Id + '|' + $client.Id] = 0
+                $updated++
+            } catch { Write-Warn "$($game.Name) - $($client.Name): could not update ($($_.Exception.Message))" }
+        }
+    }
+    if ($checked -gt 0) { Write-Ok "Automatic update: checked $checked client(s), updated $updated." }
+    return [pscustomobject]@{ Checked = $checked; Updated = $updated }
+}
+
+# The version of this utility published on the main branch (read from the first
+# bytes of install.ps1 there), or $null when it cannot be read.
+function Get-PublishedAppVersion {
+    try {
+        $request = [Net.HttpWebRequest]::Create($ScriptRawUrl)
+        $request.UserAgent = 'CallOfDutyHQ-SetupUtility/1.1'
+        $request.Timeout = 15000
+        $request.AddRange(0, 4095)
+        $response = $request.GetResponse()
+        try { $reader = New-Object IO.StreamReader($response.GetResponseStream()); $head = $reader.ReadToEnd() } finally { $response.Close() }
+        $match = [regex]::Match($head, '\$AppVersion\s*=\s*''([0-9]+(\.[0-9]+){1,3})''')
+        if ($match.Success) { return [version]$match.Groups[1].Value }
+    } catch { Write-Verbose "Could not read the published version: $($_.Exception.Message)" }
+    return $null
+}
+
+function Test-AppUpdate {
+    $published = Get-PublishedAppVersion
+    if ($null -eq $published) { Write-Info 'Could not check for a newer version of this utility.'; return $null }
+    if ($published -gt [version]$global:AppVersion) {
+        $how = if ($env:CODHQ_LAUNCHER -eq 'exe') { 'Download the new CodHQ-Setup.exe from https://github.com/LarkTheStar/fix-installer/releases' } else { 'Start it again with the same command to get it' }
+        Write-Warn "A newer version of this utility is out: $published (this is $($global:AppVersion)). $how."
+        return $true
+    }
+    Write-Ok "This utility is up to date ($($global:AppVersion))."
+    return $false
+}
+
+# ==========================================
 # GAMES: EXECUTABLE CHECK (BO3 / BO4)
 # ==========================================
 # Checks the player's own executable against the build the client expects (the size
@@ -4183,7 +4248,7 @@ function Test-GameExecutable {
     $result.Sha1 = Get-FileSha1Hex $file
     $result.Sha256 = Get-FileSha256 -Path $file
     $result.MissingFiles = @($game.ValidFiles | Where-Object { $_ -ne $game.ExeCheck.File -and -not (Test-Path -LiteralPath (Join-Path $GameFolder $_)) })
-    Write-Info ("{0}: version {1}, {2:N0} bytes" -f $game.ExeCheck.File, $(if ($result.Version) { $result.Version } else { 'unknown' }), $result.Size)
+    Write-Info ([string]::Format([cultureinfo]::InvariantCulture, '{0}: version {1}, {2:N0} bytes', $game.ExeCheck.File, $(if ($result.Version) { $result.Version } else { 'unknown' }), $result.Size))
     Write-Info "  SHA-1   $($result.Sha1)"
     Write-Info "  SHA-256 $($result.Sha256)"
     try {
@@ -4194,7 +4259,7 @@ function Test-GameExecutable {
             $result.Matches = ($expected.Size -eq $result.Size -and $expected.Sha1 -eq $result.Sha1)
             if ($result.Matches) { Write-Ok "This is the build the client expects." }
             else {
-                Write-Warn ("This is a different build than the client expects ({0:N0} bytes, SHA-1 {1})." -f $expected.Size, $expected.Sha1)
+                Write-Warn ([string]::Format([cultureinfo]::InvariantCulture, 'This is a different build than the client expects ({0:N0} bytes, SHA-1 {1}).', $expected.Size, $expected.Sha1))
                 Write-Info $game.ExeCheck.Repair
             }
         } else { Write-Warn 'The client''s manifest does not name an expected build; only your file was checked.' }
@@ -5521,13 +5586,14 @@ function Restore-GameCdKey {
                                 <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="12,0,0,0">
                                     <Button x:Name="BtnSavePlayerName" Style="{StaticResource SmallButton}" Content="Save name" Margin="0,0,8,0"/>
                                     <Button x:Name="BtnGamesRefresh" Style="{StaticResource SmallButton}" Content="Refresh" Margin="0,0,8,0" ToolTip="Look for the games again"/>
-                                    <Button x:Name="BtnGamesCheckUpdates" Style="{StaticResource SmallButton}" Content="Check all for updates" ToolTip="Ask each installed client's source whether files changed"/>
+                                    <Button x:Name="BtnGamesCheckUpdates" Style="{StaticResource SmallButton}" Content="Check all for updates" Margin="0,0,8,0" ToolTip="Ask each installed client's source whether files changed, and whether a newer version of this utility is out"/>
+                                    <Button x:Name="BtnGamesAutoUpdate" Style="{StaticResource SmallButton}" Content="Auto-update: off" ToolTip="When on, installed clients are checked and updated when this page opens and before Play"/>
                                 </StackPanel>
                             </Grid>
                         </Border>
                         <StackPanel x:Name="GamesList"/>
                         <Border Style="{StaticResource HintCard}">
-                            <TextBlock Style="{StaticResource HintText}" Text="Plutonium games need a free Plutonium account (use Plutonium login once). Black Ops 4 and HorizonMW clients are not installable; their cards say why. The research behind this page is in docs/cb-launcher."/>
+                            <TextBlock Style="{StaticResource HintText}" Text="Plutonium games need a free Plutonium account (use Plutonium login once). Call of Duty 1.1 and United Offensive 1.51 use files imported from your own copy of the game (Import on their cards). Black Ops 4 and HorizonMW are set up with their official launchers. The research behind this page is in docs/cb-launcher and docs/cod1-uo-files.md."/>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
@@ -5894,7 +5960,7 @@ function Write-Host {
         [ConsoleColor]$ForegroundColor = [ConsoleColor]::Gray,
         [switch]$NoNewline
     )
-    if ($global:OutputBox -eq $null) { Microsoft.PowerShell.Utility\Write-Host $Object -ForegroundColor $ForegroundColor -NoNewline:$NoNewline; return }
+    if ($null -eq $global:OutputBox) { Microsoft.PowerShell.Utility\Write-Host $Object -ForegroundColor $ForegroundColor -NoNewline:$NoNewline; return }
     $text = if ($null -eq $Object) { '' } else { [string]$Object }
     
     if ($text -match '^\s*\[(\d+)\]\s*(.*)') {
@@ -5936,7 +6002,7 @@ function Write-Warning {
 
 function Write-Progress {
     param($Activity, $Status, $PercentComplete, [switch]$Completed)
-    if ($global:StatusText -ne $null) {
+    if ($null -ne $global:StatusText) {
         # Replaced PushFrame with a safe UI update to prevent crashes
         $global:StatusText.Dispatcher.Invoke([Action]{
             if ($Completed) {
@@ -7189,7 +7255,13 @@ $global:GameActionMap = @{
         $client = $game.Clients | Where-Object { $_.Id -eq $t.Client } | Select-Object -First 1
         if ((Read-Host "Remove $($client.Name) from $($game.Name)? Its files are deleted and any game file it replaced is put back. [y/N]") -notmatch '^(y|yes)$') { Stop-Cancelled 'Nothing was removed.' }
         Remove-GameClient -GameId $t.Game -ClientId $t.Client }
-    'play' = { param($t) $null = Start-CatalogGame -GameId $t.Game -ModeId $t.Mode }
+    'play' = { param($t)
+        if ([bool](Get-AppSettings).AutoUpdateClients) {
+            $mode = (Get-CatalogGame -Id $t.Game).Modes | Where-Object { $_.Id -eq $t.Mode } | Select-Object -First 1
+            $ids = @(@($mode.Clients) + @($mode.Requires) | Where-Object { $_ } | Select-Object -Unique)
+            if ($ids.Count -gt 0) { $null = Invoke-ClientAutoUpdate -GameId $t.Game -ClientIds $ids }
+        }
+        $null = Start-CatalogGame -GameId $t.Game -ModeId $t.Mode }
     'exe' = { param($t) $null = Test-GameExecutable -GameId $t.Game }
     'plutologin' = { param($t) Start-PlutoniumLogin }
     'cdkey' = { param($t) $game = Get-CatalogGame -Id $t.Game
@@ -7229,7 +7301,9 @@ $global:GameActionMap = @{
                 } catch { Write-Warn "$($game.Name) - $($client.Name): could not check ($($_.Exception.Message))" }
             }
         }
-        if ($checked -eq 0) { Write-Info 'No installed clients to check.' } else { Write-Ok "Checked $checked client(s); $pending have updates." } }
+        if ($checked -eq 0) { Write-Info 'No installed clients to check.' } else { Write-Ok "Checked $checked client(s); $pending have updates." }
+        $null = Test-AppUpdate }
+    'autoupdate' = { param($t) $null = Invoke-ClientAutoUpdate; $null = Test-AppUpdate }
 }
 
 # Builds one card per catalogue game from its current state.
@@ -7339,7 +7413,30 @@ $window.FindName('BtnSavePlayerName').Add_Click({
 $window.FindName('BtnGamesRefresh').Add_Click({ Update-GamesPage; Add-LogEntry -Text '[OK]   Games list refreshed.' -Color '#4EC9B0' })
 $window.FindName('BtnGamesCheckUpdates').Add_Click({ Run-Action -Action $global:GameActionMap['checkupdates'] -Arguments @(@{}); Update-GamesPage })
 # The cards are built when the page is first opened, so detection does not slow startup.
-$window.FindName('NavGames').Add_Click({ if ($global:MainWindow.FindName('GamesList').Children.Count -eq 0) { Update-GamesPage } })
+$window.FindName('NavGames').Add_Click({
+    if ($global:MainWindow.FindName('GamesList').Children.Count -eq 0) {
+        Update-GamesPage
+        # The first time the page opens in a session, with Auto-update on.
+        if ([bool](Get-AppSettings).AutoUpdateClients -and -not $global:GamesAutoUpdated) {
+            $global:GamesAutoUpdated = $true
+            Run-Action -Action $global:GameActionMap['autoupdate'] -Arguments @(@{})
+            Update-GamesPage
+        }
+    }
+})
+function Update-AutoUpdateButton {
+    $button = $global:MainWindow.FindName('BtnGamesAutoUpdate')
+    if ($null -ne $button) { $button.Content = if ([bool](Get-AppSettings).AutoUpdateClients) { 'Auto-update: on' } else { 'Auto-update: off' } }
+}
+$window.FindName('BtnGamesAutoUpdate').Add_Click({
+    $settings = Get-AppSettings
+    $settings.AutoUpdateClients = -not [bool]$settings.AutoUpdateClients
+    if (Save-AppSettings -Settings $settings) {
+        Update-AutoUpdateButton
+        Add-LogEntry -Text ('[OK]   Automatic client updates ' + $(if ($settings.AutoUpdateClients) { 'on: checked when the Games page opens and before Play.' } else { 'off.' })) -Color '#4EC9B0'
+    }
+})
+Update-AutoUpdateButton
 
 # Makes it obvious that this window is the administrator worker, and what it is
 # busy with, instead of looking like an ordinary idle session.
