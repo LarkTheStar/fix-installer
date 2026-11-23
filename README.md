@@ -112,6 +112,11 @@ and installs the community client that brings it back online:
 | CoD2x | CoD2 (MP) |
 | T6SP-Mod | Black Ops II (campaign) |
 | IW6x, S1x, BOIII, IW7-Mod, H1-Mod, H2-Mod | Ghosts, AW, BO3, IW, MWR, MW2 Campaign Remastered |
+| CoD1x (1.1x), the 1.1 files from your own copy | Call of Duty (also plays as Steam's version) |
+| UOx (1.51x), the 1.51 files from your own copy | United Offensive (also plays as Steam's version) |
+| Shield's official launcher | Black Ops 4 (Project BO4: online or offline) |
+| HorizonMW's official launcher | HorizonMW (on Modern Warfare Remastered) |
+| AuroraMod's H1-Mod release | MWR (as an alternative to CB's build) |
 
 How it decides what to download comes from a file-by-file audit of the CB Servers
 launcher's public client manifests (`docs/cb-launcher/`, re-run with
@@ -123,6 +128,8 @@ launcher's public client manifests (`docs/cb-launcher/`, re-run with
   executables) are never downloaded: your own are used, and where a client needs one
   under another name it is made from yours when it is the right build;
 - a file added to a manifest after the audit is skipped until the catalogue is updated;
+- Activision's game files are never downloaded: CoD1 / UO version files are imported
+  from your own copy, and Shield's launcher fetches what Project BO4 needs itself;
 - full game downloads, CB's copies of the BO3/BO4 executables and the CD keys built
   into the CB launcher are not used (`docs/cb-launcher/unavailable.md` explains why
   and what to do instead).
@@ -135,8 +142,34 @@ backs it up, saves the key you type (from Steam: right-click the game > Manage >
 Keys) and restores a backup; keys never appear in the activity log. Plutonium games
 need a free Plutonium account: use **Plutonium login** once.
 
-The Black Ops 4 (Project BO4) and HorizonMW clients are not installable; their cards
-say why.
+**Call of Duty and United Offensive versions.** Both play as Steam ships them. For
+1.1 / 1.1x and 1.51 / 1.51x, use **Import** on the card and pick the folder of your
+own copy of the game (an old retail install, a backup or the disc). Only the files
+that differ from Steam's are copied, each recognised by its size and CRC-32, and the
+card lists any it could not find by name. Then install CoD1x or UOx. A version's
+**Play** button stays disabled, with the reason on hover, until everything it needs
+is in place, and **Use Steam version** puts the Steam files back exactly. The file
+list, the exe patch and the registry values are in
+[docs/cod1-uo-files.md](docs/cod1-uo-files.md).
+
+**Black Ops 4 (Project BO4).** Install puts Shield's official launcher in the game
+folder, as its guide says, after backing up your `BlackOps4.exe` and `LPC` files. It
+then runs that launcher without a window to download the client, the support mod and
+Target Range (about 2.2 GB). **Play: Online** / **Play: Offline** writes your name and
+the server into `project-bo4.json` and opens Shield's launcher; press Play Client
+there. **Repair** deletes `BlackOps4.start` (Shield's fix for a black screen at start).
+**Remove** deletes everything the launcher added and puts your exe and LPC files back.
+
+**HorizonMW.** Install puts HorizonMW's official launcher in its own folder, as its
+guide says, copies your MWR folder to the clipboard and opens it. In the launcher,
+set that folder as the install directory and press Verify game files. **Play** then
+starts `hmw-mod.exe` with your name. Remove lists what the launcher added to the MWR
+folder and asks before deleting it.
+
+**Updates.** **Check for updates** covers every client: CB's manifests, Plutonium's
+revision, the newest GitHub release of CoD1x, UOx, T6SP-Mod and AuroraMod's H1-Mod
+(each checked against GitHub's published digest), Shield's content (asked of its own
+launcher) and HorizonMW's launcher version.
 
 ## The Nuclear downgrade
 

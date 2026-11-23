@@ -9,8 +9,8 @@ its status comes from [manifests.md](manifests.md).
 
 | Game | CB id | Steam app ID | Files that mark a valid folder | Clients (installer status) |
 | --- | --- | --- | --- | --- |
-| Call of Duty (2003) | `cod1` | 2620 | `CoDSP.exe`, `CoDMP.exe` | none needed: plays with the player's own executables. CoD1x not installable (needs its patched `CoDMP.exe`) |
-| United Offensive | `coduo` | 2640 | `CoDUOSP.exe`, `CoDUOMP.exe` | none needed: plays with the player's own executables. UOx not installable |
+| Call of Duty (2003) | `cod1` | 2620 | `CoDSP.exe`, `CoDMP.exe` | Steam version as it is; 1.1 (files imported from the player's own copy) and 1.1x (CoD1x's official release); optional retail 1.5 files (see [../cod1-uo-files.md](../cod1-uo-files.md)) |
+| United Offensive | `coduo` | 2640 | `CoDUOSP.exe`, `CoDUOMP.exe` | Steam version as it is; 1.51 (files imported from the player's own copy) and 1.51x (UOx built from source, exe copy made from the player's 1.51 exe) |
 | Call of Duty 2 | `cod2x` | 2630 | `CoD2SP_s.exe`, `CoD2MP_s.exe` | CoD2x (MP). Needs administrator rights |
 | Call of Duty 4 | `cod4x` | 7940 | `binkw32.dll`, `iw3mp.exe`, `iw3sp.exe` | iw3x (MP, CB's default), CoD4x (MP), IW3SP-Mod (campaign) |
 | World at War | `t4` | 10090 | `binkw32.dll`, `CoDWaW.exe`, `CoDWaWmp.exe` | Plutonium |
@@ -22,10 +22,10 @@ its status comes from [manifests.md](manifests.md).
 | Advanced Warfare | `s1x` | 209650 | `s1_sp64_ship.exe`, `s1_mp64_ship.exe` | S1x |
 | Black Ops III | `boiii` | 311210 | `BlackOps3.exe` | BOIII (runs the player's own `BlackOps3.exe`) |
 | Infinite Warfare | `iw7-mod` | 292730 | `iw7_ship.exe` | IW7-Mod |
-| MW Remastered | `h1-mod` | 393080 | `h1_sp64_ship.exe`, `h1_mp64_ship.exe` | H1-Mod |
+| MW Remastered | `h1-mod` | 393080 | `h1_sp64_ship.exe`, `h1_mp64_ship.exe` | H1-Mod (CB's build or AuroraMod's own release) |
 | MW2 Campaign Remastered | `mw2r` | not on Steam (folder picker) | `MW2CR.exe`, `MW2 Campaign Remastered Launcher.exe` | H2-Mod |
-| Black Ops 4 | `bo4` | not on Steam (Battle.net; folder picker) | `BlackOps4.exe`, `BlackOps4_boot.exe`, `Black Ops 4 Launcher.exe` | Project BO4 not installable (see [unavailable.md](unavailable.md)) |
-| HorizonMW | `hmw-mod` | uses MWR (393080) | `h1_mp64_ship.exe` | not installable (see [horizonmw.md](horizonmw.md)) |
+| Black Ops 4 | `bo4` | not on Steam (Battle.net; folder picker) | `BlackOps4.exe`, `BlackOps4_boot.exe`, `Black Ops 4 Launcher.exe` | Project BO4: Shield's official launcher, which downloads the client itself |
+| HorizonMW | `hmw-mod` | uses MWR (393080) | `h1_mp64_ship.exe` | HorizonMW's official launcher (see [horizonmw.md](horizonmw.md)) |
 
 The Steam store returns no page for app IDs 42690, 42750, 10190, 42710, 202990 and
 212910 (separate multiplayer/server packages), so the installer only uses the IDs above.
@@ -69,7 +69,7 @@ Optional CB launch flags the installer does not turn on by default: BO3 `-nointr
 | IW3SP-Mod | `iw3sp_data\`, the exe and DLLs | `bin\launcher.dll` → `%LOCALAPPDATA%\CallofDuty4MW` |
 | IW4x, IW6x, S1x, CoD2x, Plutonium bootstrapper, AlterWare, T6SP-Mod | everything | none |
 | BOIII | `boiii.exe` | `data\` → `%LOCALAPPDATA%\boiii` |
-| H1-Mod | `h1-mod.exe` | `cdata\` → `%LOCALAPPDATA%\h1-mod` |
+| H1-Mod (CB's build or AuroraMod's own release) | `h1-mod.exe` | `cdata\` → `%LOCALAPPDATA%\h1-mod` |
 | IW7-Mod | `iw7-mod.exe` | `cdata\` → `%LOCALAPPDATA%\auroramod\iw7-mod` |
 | H2-Mod | `h2-mod.exe` | `cdata\` → `%LOCALAPPDATA%\h2-mod` |
 | Plutonium | `plutonium.exe` | Plutonium installs itself to `%LOCALAPPDATA%\Plutonium` |
