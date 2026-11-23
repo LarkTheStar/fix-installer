@@ -1248,6 +1248,7 @@ Describe 'Game catalogue' {
 
     It 'pins a SHA-256 for every file it downloads outside CB manifests' {
         foreach ($client in @($catalog.Clients | Where-Object { $_.Source -ne 'cb' })) {
+            if ($client.Extract) { $client.Archive.Url | Should -Match '^https://'; $client.Archive.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because $client.Id; continue }
             @($client.Assets).Count | Should -BeGreaterThan 0 -Because $client.Id
             foreach ($asset in $client.Assets) {
                 $asset.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because "$($client.Id) $($asset.Path)"
@@ -1479,6 +1480,83 @@ Describe 'Game clients: install, update, remove' {
         $null = Install-GameClient -GameId 'mwr' -ClientId 'h1-mod' -GameFolder $mwrFolder -Manifest (New-FakeManifest -Client $h1 -Files ([ordered]@{ 'h1-mod.exe' = 'exe'; 'cdata/ui/x.lua' = 'lua' })) -RetryDelaySeconds 0
         Get-Text (Join-Path $mwrFolder 'h1-mod.exe') | Should -Be 'exe'
         Get-Text (Join-Path $appData 'h1-mod\cdata\ui\x.lua') | Should -Be 'lua'
+    }
+}
+
+Describe 'Call of Duty 1.1 archive client' {
+    BeforeEach {
+        $cod1Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'CoDSP.exe') -Value 'retail sp'
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'CoDMP.exe') -Value 'retail mp'
+        $global:cod1Archive = Join-Path $TestDrive ('cod1-1.1-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod1Archive -Entries ([ordered]@{ 'Call of Duty/CoDSP.exe' = '1.1 sp'; 'Call of Duty/CoDMP.exe' = '1.1 mp'; 'Call of Duty/main/pak0.pk3' = 'data' })
+        # The release itself is not downloaded here: the ZIP above takes its place.
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:cod1Archive -Destination $Destination -Force; return 0 }
+        Mock Write-Host { }
+        Mock Write-Progress { }
+    }
+
+    It 'is pinned to the 1.1 release this project publishes' {
+        $client = (Get-CatalogGame -Id 'cod1').Clients | Where-Object Id -eq 'cod1-v11'
+        $client.Extract | Should -BeTrue
+        $client.Source | Should -Be 'archive'
+        $client.Archive.Url | Should -Be 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.1.SP.MP.zip'
+        $client.Archive.Size | Should -Be 1207836351
+        $client.Archive.Sha256 | Should -Match '^[0-9a-f]{64}$'
+        $game = Get-CatalogGame -Id 'cod1'
+        @($game.SteamAppIds) | Should -Be @(2620)
+        @($game.Modes | ForEach-Object { $_.Exe }) | Should -Be @('CoDSP.exe', 'CoDMP.exe')
+    }
+
+    It 'copies the 1.1 files in without the folder the archive wraps them in' {
+        $result = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1 mp'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be '1.1 sp'
+        Get-Text (Join-Path $cod1Folder 'main\pak0.pk3') | Should -Be 'data'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'Call of Duty') | Should -BeFalse
+        $result.Downloaded | Should -Be 3
+        $record = Read-ClientRecord -GameFolder $cod1Folder -ClientId 'cod1-v11'
+        $record.Source | Should -Be 'archive'
+        $record.ArchiveSha256 | Should -Be ((Get-CatalogGame -Id 'cod1').Clients[0].Archive.Sha256)
+        @($record.Files).Count | Should -Be 3
+        @($record.Backups).Count | Should -Be 2
+        Test-GameClientInstalled -GameFolder $cod1Folder -ClientId 'cod1-v11' | Should -BeTrue
+        Get-GameClientUpdateCount -Client (Get-CatalogGame -Id 'cod1').Clients[0] -GameFolder $cod1Folder | Should -Be 0
+    }
+
+    It 'puts the player''s own executables back on removal and leaves nothing behind' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'main') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod1Folder '.codhq-backups') | Should -BeFalse
+    }
+
+    It 'keeps the player''s original when the same archive is installed twice' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $again = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $again.Downloaded | Should -Be 0
+        @((Read-ClientRecord -GameFolder $cod1Folder -ClientId 'cod1-v11').Backups).Count | Should -Be 2
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
+    }
+
+    It 'reports a different archive as an update' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $newer = (Get-CatalogGame -Id 'cod1').Clients[0].PSObject.Copy()
+        $newer.Archive = @{ Url = 'https://example.com/Call.of.Duty.1.2.zip'; Size = 1; Sha256 = ('B' * 64) }
+        Get-GameClientUpdateCount -Client $newer -GameFolder $cod1Folder | Should -Be 1
+    }
+
+    It 'changes nothing when the archive cannot be read' {
+        Set-Content -LiteralPath $global:cod1Archive -Value 'not a zip'
+        { Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'main') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11') | Should -BeFalse
     }
 }
 

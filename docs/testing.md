@@ -11,7 +11,7 @@ prove a client actually starts and joins a server.
 | Pester, Windows PowerShell 5.1 | `powershell -NoProfile -ExecutionPolicy Bypass -File tests\Invoke-Tests.ps1` | every install / update / remove path, release archives, launcher cleanup, CD keys, update checks |
 | Pester, PowerShell 7 | `pwsh -NoProfile -File tests\Invoke-Tests.ps1` | the same |
 | Window layout | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Test-Xaml.ps1` | every control the script uses exists |
-| Real window | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Test-Gui.ps1` | every page opens, all 14 game cards appear, the admin hand-off works |
+| Real window | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Test-Gui.ps1` | every page opens, all 15 game cards appear, the admin hand-off works |
 | Sandbox | `powershell -NoProfile -ExecutionPolicy Bypass -File tests\Start-Sandbox.ps1 -Reset` | the real window against fake Steam, CoD4, MW2, BO2, Ghosts, MWR and BO4 folders, with real downloads |
 
 In the sandbox window, for each fake game:
@@ -49,15 +49,16 @@ Order, from the least to the most involved:
 
 | Order | Game | Clients / versions | Game-specific checks |
 | --- | --- | --- | --- |
-| 1 | Call of Duty 4 | iw3x, CoD4x, IW3SP-Mod | install iw3x and CoD4x one at a time (they conflict); campaign via IW3SP-Mod |
-| 2 | Ghosts | IW6x | campaign and MP |
-| 3 | World at War, Black Ops, Black Ops II, MW3 | Plutonium | **Plutonium login** once; each mode's `plutonium://play/<id>` starts |
-| 4 | Black Ops II campaign | T6SP-Mod | campaign starts without Plutonium |
-| 5 | MW2, MW3 campaign | IW4x, AlterWare | Spec Ops through AlterWare |
-| 6 | Advanced Warfare, Infinite Warfare, MWR | S1x, IW7-Mod, H1-Mod (CB) and H1-Mod (AuroraMod) | try both H1-Mod sources one after the other |
-| 7 | Black Ops III | BOIII | **Check game exe** first; Play starts BOIII |
-| 8 | Black Ops 4 | Project BO4 (Shield) | Install takes a while (about 2.2 GB through Shield's launcher); Play Online and Play Offline open Shield's launcher with your name in `project-bo4.json`; press Play Client; **Repair** if the screen stays black; Remove puts your `BlackOps4.exe` and LPC back; Battle.net Scan and Repair clean |
-| 9 | HorizonMW | HMW Launcher | Install opens the HMW Launcher: paste the MWR folder (on the clipboard), Verify game files; then **Play** on the card; Remove asks before deleting what the launcher added |
+| 1 | Call of Duty (2003) | 1.1 (singleplayer and MP) | Install copies the 1.1 files from this project's release over the folder; both Play modes start the 1.1 exes; Remove puts the previous game files back |
+| 2 | Call of Duty 4 | iw3x, CoD4x, IW3SP-Mod | install iw3x and CoD4x one at a time (they conflict); campaign via IW3SP-Mod |
+| 3 | Ghosts | IW6x | campaign and MP |
+| 4 | World at War, Black Ops, Black Ops II, MW3 | Plutonium | **Plutonium login** once; each mode's `plutonium://play/<id>` starts |
+| 5 | Black Ops II campaign | T6SP-Mod | campaign starts without Plutonium |
+| 6 | MW2, MW3 campaign | IW4x, AlterWare | Spec Ops through AlterWare |
+| 7 | Advanced Warfare, Infinite Warfare, MWR | S1x, IW7-Mod, H1-Mod (CB) and H1-Mod (AuroraMod) | try both H1-Mod sources one after the other |
+| 8 | Black Ops III | BOIII | **Check game exe** first; Play starts BOIII |
+| 9 | Black Ops 4 | Project BO4 (Shield) | Install takes a while (about 2.2 GB through Shield's launcher); Play Online and Play Offline open Shield's launcher with your name in `project-bo4.json`; press Play Client; **Repair** if the screen stays black; Remove puts your `BlackOps4.exe` and LPC back; Battle.net Scan and Repair clean |
+| 10 | HorizonMW | HMW Launcher | Install opens the HMW Launcher: paste the MWR folder (on the clipboard), Verify game files; then **Play** on the card; Remove asks before deleting what the launcher added |
 
 ## When something fails
 

@@ -2183,7 +2183,10 @@ function Expand-ZipOverwrite {
         [string]$ZipPath,
         [string]$DestinationPath,
         [System.Collections.Generic.List[object]]$Journal = $null,
-        [string]$BackupDirectory = ''
+        [string]$BackupDirectory = '',
+        # Folder the archive wraps all its entries in (for example "Call of Duty\"), left
+        # out of the paths that are written.
+        [string]$StripPrefix = ''
     )
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -2192,12 +2195,19 @@ function Expand-ZipOverwrite {
     $destPrefix = $destRoot + [IO.Path]::DirectorySeparatorChar
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
+        $stripPrefix = ($StripPrefix -replace '/', '\').TrimEnd('\')
         $planned = [System.Collections.Generic.List[object]]::new()
         foreach ($entry in $zip.Entries) {
             $entryPath = $entry.FullName -replace '/', '\'
             if ([string]::IsNullOrEmpty($entryPath)) { continue }
+            if ($stripPrefix) {
+                $trimmed = $entryPath.TrimEnd('\')
+                if ($trimmed -ieq $stripPrefix) { continue }
+                if (-not $trimmed.StartsWith($stripPrefix + '\', [StringComparison]::OrdinalIgnoreCase)) { Stop-Installer "ZIP entry is not inside the archive's root folder: $($entry.FullName)" }
+                $entryPath = $trimmed.Substring($stripPrefix.Length + 1)
+            }
             $isDirectory = [string]::IsNullOrEmpty($entry.Name)
-            $relative = (Get-ValidatedRelativePath $entry.FullName).TrimEnd('\')
+            $relative = (Get-ValidatedRelativePath $entryPath).TrimEnd('\')
             if ([string]::IsNullOrEmpty($relative)) { continue }
             $unixMode = ($entry.ExternalAttributes -shr 16) -band 0xF000
             if ($unixMode -eq 0xA000) { Stop-Installer "ZIP contains a symbolic link, which is not allowed: $($entry.FullName)" }
@@ -2686,12 +2696,16 @@ function New-CatalogClient {
         # by Remove (after asking, with -ConfirmCleanup).
         [string[]]$Watch = @(), [bool]$ConfirmCleanup = $false,
         # Text shown as the tooltip of the client's install button.
-        [string]$Description = ''
+        [string]$Description = '',
+        # A release archive installed exactly as published: it goes into the game folder
+        # as it is (pinned by SHA-256; its contents are not listed in the catalogue).
+        $Archive = $null, [bool]$Extract = $false
     )
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
-        Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description }
+        Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
+        Archive = $Archive; Extract = $Extract }
 }
 
 function New-CatalogMode {
@@ -2713,6 +2727,31 @@ function Get-ArchiveAssetList {
     foreach ($entry in $Entries) { [pscustomobject]@{ Path = [string]$entry[0]; Entry = [string]$entry[0]; Size = [int64]$entry[1]; Sha256 = [string]$entry[2]; Archive = $archive } }
 }
 
+# The single folder an archive wraps all its files in, or '' when it has none. A wrapper
+# that is one of the game's own folders (a ZIP that starts with main/, miles/, pb/ or
+# uo/) is already the game layout and is never stripped.
+function Get-GameArchiveRoot {
+    param([Parameter(Mandatory)][string]$ZipPath, [string[]]$KeepFolders = @('main', 'miles', 'pb', 'uo', 'zone', 'players2'))
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $tops = [System.Collections.Generic.List[string]]::new()
+        foreach ($entry in $zip.Entries) {
+            $path = $entry.FullName -replace '\\', '/'
+            if ([string]::IsNullOrEmpty($path)) { continue }
+            $slash = $path.IndexOf('/')
+            if ($slash -lt 0) { return '' }
+            $top = $path.Substring(0, $slash)
+            if ($tops.Count -eq 0) { $tops.Add($top) }
+            elseif ($tops[0] -ine $top) { return '' }
+        }
+        if ($tops.Count -ne 1) { return '' }
+        foreach ($keep in @($KeepFolders)) { if ($tops[0] -ieq $keep) { return '' } }
+        return $tops[0]
+    } finally { $zip.Dispose() }
+}
+
 # The Plutonium bootstrapper and the AlterWare launcher are shared by several games.
 function Get-PlutoniumClient {
     New-CatalogClient -Id 'plutonium' -Name 'Plutonium' -Source 'plutonium' -Assets @(
@@ -2723,6 +2762,18 @@ function Get-GameCatalog {
     $cod4Deny = @('iw3mp.exe')
     $cod4Derive = @{ 'miles32.dll' = 'mss32.dll' }
     @(
+        # Call of Duty (2003): the 1.1 singleplayer and multiplayer files, from this
+        # project's own release, installed exactly as published.
+        [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(2620); Detect = 'steam'
+            ValidFiles = @('CoDSP.exe', 'CoDMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
+            NeedsElevation = $false; DpiFix = @('CoDSP.exe', 'CoDMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            Clients = @((New-CatalogClient -Id 'cod1-v11' -Name '1.1 (singleplayer and MP)' -Source 'archive' -Extract $true -Description 'Copies the 1.1 singleplayer and multiplayer files over your game folder.' -Archive @{
+                    Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.1.SP.MP.zip'
+                    Size = 1207836351
+                    Sha256 = '715bef06e94a98b5654fee62da81cd5f17ded051a88b84890e7df0db06c91652' }))
+            Note = 'Install 1.1 copies the singleplayer and multiplayer files from this project''s release over your game folder; your own files are backed up and put back by Remove.'
+            Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDSP.exe' -Clients @('cod1-v11')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDMP.exe' -Clients @('cod1-v11')))
+            Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod4'; Name = 'Call of Duty 4: Modern Warfare'; Year = '2007'; SteamAppIds = @(7940); Detect = 'steam'
             ValidFiles = @('binkw32.dll', 'iw3mp.exe', 'iw3sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
             NeedsElevation = $false; DpiFix = @(); CdKey = 'cod4'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
@@ -3314,6 +3365,93 @@ function Get-WatchedGameFiles {
     return @($found | Where-Object { $_ -notlike '.codhq-*' -and $_ -notlike 'players2\*' } | Sort-Object -Unique)
 }
 
+# Installing an archive client (the Call of Duty 1.1 files this project publishes in its
+# own release): the ZIP goes into the game folder as it is, every file it writes is
+# journaled, a game file it replaces is moved into the client's backup folder first, and
+# the record lists every file, so Remove puts the folder back exactly. The archive is
+# pinned by SHA-256; its contents are deliberately not listed anywhere.
+function Install-GameClientArchive {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
+    $archive = $Client.Archive
+    if ($null -eq $archive -or [string]::IsNullOrWhiteSpace([string]$archive.Url) -or [string]::IsNullOrWhiteSpace([string]$archive.Sha256)) { throw "$($Client.Name) has no archive to install." }
+    $previous = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
+    $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $Client.Id
+    # The same archive, and every file it wrote is still there: nothing to do.
+    if ($previous -and [string]$previous.ArchiveSha256 -eq [string]$archive.Sha256) {
+        $missing = @($previous.Files | Where-Object { -not (Test-Path -LiteralPath ([string]$_.Target) -PathType Leaf) })
+        if ($missing.Count -eq 0) {
+            Write-Ok "$($Client.Name) is already installed and up to date."
+            return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = 0; Current = @($previous.Files).Count; Derived = 0; Kept = 0; Skipped = 0 }
+        }
+    }
+    $stage = Join-Path $env:TEMP ('codhq-archive-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $stage -Force
+    $zipPath = Join-Path $stage (([string]$archive.Url -split '/')[-1])
+    $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $Client.Id
+    $journal = [System.Collections.Generic.List[object]]::new()
+    try {
+        Write-Info "Downloading $($Client.Name): $(([string]$archive.Url -split '/')[-1])"
+        $null = Invoke-ResumableDownload -Url ([string]$archive.Url) -Destination $zipPath -Label "Downloading $($Client.Name)" -ExpectedSha256 ([string]$archive.Sha256) -RetryDelaySeconds $RetryDelaySeconds
+        $root = Get-GameArchiveRoot -ZipPath $zipPath
+        if ($root) { Write-Info "The archive keeps its files in '$root\'; they are copied in without it." }
+        Write-Info "Copying $($Client.Name) into $GameFolder ..."
+        Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $backupRoot -StripPrefix $root
+    } catch {
+        Write-Warn "Installing $($Client.Name) failed; putting back what was changed..."
+        $null = Undo-ZipExtraction -Journal $journal
+        throw
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    $backups = [System.Collections.Generic.List[object]]::new()
+    if ($previous) { foreach ($b in @($previous.Backups)) { $backups.Add([pscustomobject]@{ Target = [string]$b.Target; Backup = [string]$b.Backup }) } }
+    $files = [System.Collections.Generic.List[object]]::new()
+    $createdDirs = [System.Collections.Generic.List[string]]::new()
+    if ($previous) { foreach ($d in @($previous.CreatedDirs)) { $createdDirs.Add([string]$d) } }
+    foreach ($change in $journal) {
+        if ($change.Kind -eq 'Directory') { $createdDirs.Add([string]$change.Path); continue }
+        $full = [string]$change.Path
+        if ($change.Kind -eq 'Replaced') {
+            # What Expand-ZipOverwrite moved aside is the file the previous install wrote;
+            # the player's own original is already in this client's record. Keep that one.
+            $earlier = @($backups | Where-Object { $_.Target -ieq $full }) | Select-Object -First 1
+            if ($earlier) { Remove-Item -LiteralPath ([string]$change.Backup) -Force -ErrorAction SilentlyContinue }
+            else { $backups.Add([pscustomobject]@{ Target = $full; Backup = [string]$change.Backup }) }
+        }
+        $files.Add([pscustomobject]@{ Path = $full.Substring($GameFolder.Length + 1); Dest = 'game'; Target = $full
+            Size = (Get-Item -LiteralPath $full).Length; Sha1 = (Get-FileSha1Hex $full); Sha256 = (Get-FileSha256 -Path $full); Derived = $false; Kind = 'archive' })
+    }
+
+    # Files the previous install wrote that this archive no longer has: put the original
+    # back if there is one, otherwise delete them (unless another client still uses them).
+    if ($previous) {
+        $written = @{}
+        foreach ($file in $files) { $written[([string]$file.Target).ToLowerInvariant()] = $true }
+        foreach ($old in @($previous.Files)) {
+            $oldTarget = [string]$old.Target
+            if ($written.ContainsKey($oldTarget.ToLowerInvariant()) -or $owners.ContainsKey($oldTarget.ToLowerInvariant())) { continue }
+            $backup = @($backups | Where-Object { $_.Target -ieq $oldTarget }) | Select-Object -First 1
+            if ($backup -and (Test-Path -LiteralPath ([string]$backup.Backup) -PathType Leaf)) {
+                Copy-FileAtomically -Source ([string]$backup.Backup) -Destination $oldTarget
+                Remove-Item -LiteralPath ([string]$backup.Backup) -Force -ErrorAction SilentlyContinue
+                $null = $backups.Remove($backup)
+            } elseif (Test-Path -LiteralPath $oldTarget -PathType Leaf) { Remove-Item -LiteralPath $oldTarget -Force -ErrorAction Stop }
+            Write-Info "Removed a file $($Client.Name) no longer ships: $($old.Path)"
+        }
+    }
+
+    Write-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id -Record ([pscustomobject]@{
+        Version = 1; GameId = $Game.Id; ClientId = $Client.Id; ClientName = $Client.Name; Source = 'archive'; Manifest = ''
+        ManifestHash = ''; ReleaseTag = ''; ArchiveUrl = [string]$archive.Url; ArchiveSha256 = [string]$archive.Sha256
+        InstalledAt = [DateTime]::UtcNow.ToString('o'); GameFolder = $GameFolder
+        Files = @($files.ToArray()); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs | Select-Object -Unique); ExpectedGameFiles = @()
+        Snapshot = @() })
+    Write-Ok "$($Client.Name) is installed for $($Game.Name)."
+    Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Files copied from the archive: {0}. Your own game files kept: {1}.', $files.Count, $backups.Count))
+    return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = $files.Count; Current = 0; Derived = 0; Kept = $backups.Count; Skipped = 0 }
+}
+
 function Install-GameClient {
     param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3,
           # Take the newest release of a GitHub client instead of the pinned one.
@@ -3330,6 +3468,10 @@ function Install-GameClient {
             if (-not $otherName) { $otherName = $other }
             throw "$($client.Name) and $otherName replace the same files and cannot be installed together. Remove $otherName first; nothing was changed."
         }
+    }
+
+    if ($client.Extract) {
+        return (Install-GameClientArchive -Game $game -Client $client -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds)
     }
 
     Write-Info "Checking what $($client.Name) needs in $GameFolder ..."
@@ -3490,6 +3632,13 @@ function Test-GameClientInstalled {
 function Get-GameClientUpdateCount {
     param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder)
     switch ($Client.Source) {
+        'archive' {
+            $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
+            if ($null -eq $record) { return 1 }
+            if ([string]$record.ArchiveSha256 -ne [string]$Client.Archive.Sha256) { return 1 }
+            foreach ($file in @($record.Files)) { if (-not (Test-Path -LiteralPath ([string]$file.Target) -PathType Leaf)) { return 1 } }
+            return 0
+        }
         'shield' { $status = Invoke-ShieldLauncherHeadless -GameFolder $GameFolder; if (-not $status.Ok) { throw $(if ($status.Error) { $status.Error } else { 'Shield''s launcher could not check.' }) }; return [int]([bool]($status.Download -gt 0 -or $status.LauncherUpdate)) }
         'hmw' {
             $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id

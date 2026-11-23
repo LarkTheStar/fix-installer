@@ -280,7 +280,9 @@ These come out of the scrape and are not decided yet:
 2. **Every patched executable is a copy of the game's own file** (same sizes as the
    retail ones: `CoDMP.exe` 1,564,672, `CoDUOMP.exe` 1,904,640), so under the
    file-sourcing rule they cannot be downloaded; a client that needs one would have to
-   patch or import the player's own copy.
+   patch or import the player's own copy. Resolved for CoD1 on 2026-11-24: its 1.1
+   singleplayer and MP files come from this project's own release (tag `1.1`), pinned
+   by SHA-256 and installed as published, so nothing is taken from CB.
 3. **CoD2's client is a DLL pair, not an executable**, and it replaces the game's
    `mss32.dll`. If it is used, the retail library has to be kept as
    `mss32_original.dll` and restored by Remove.
