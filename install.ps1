@@ -2632,16 +2632,49 @@ function New-CatalogClient {
     param(
         [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Name, [string]$Source = 'cb',
         [string]$Manifest = '', [string]$Folder = '', [string[]]$Allow = @(), [string[]]$Deny = @(),
-        [hashtable]$Derive = @{}, [string]$AppData = '', [string[]]$GameFiles = @(), [object[]]$Assets = @()
+        [hashtable]$Derive = @{}, [string]$AppData = '', [string[]]$GameFiles = @(), [object[]]$Assets = @(),
+        # GitHub release the assets come from, for update checks (TagPrefix picks among several).
+        [string]$ReleaseRepo = '', [string]$ReleaseTag = '', [string]$ReleaseTagPrefix = '',
+        # Clients of the same game that cannot be installed at the same time.
+        [string[]]$Conflicts = @(),
+        # Game files a launcher-type client's own launcher replaces later: backed up at
+        # install, put back by Remove.
+        [string[]]$Protect = @(),
+        # Where such a launcher adds files: what is new there since the install is deleted
+        # by Remove (after asking, with -ConfirmCleanup).
+        [string[]]$Watch = @(), [bool]$ConfirmCleanup = $false,
+        # Version values written to the game's registry key while this client is in place.
+        [string]$RegistryVersion = '',
+        # Text shown on the card for clients whose files come from the player's own copy.
+        [string]$Description = ''
     )
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
-        Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets) }
+        Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
+        ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; ReleaseTagPrefix = $ReleaseTagPrefix; Conflicts = @($Conflicts)
+        Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; RegistryVersion = $RegistryVersion; Description = $Description }
 }
 
 function New-CatalogMode {
     param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Label, [string]$Kind = 'exe', [string]$Exe = '',
-          [string]$Arguments = '', [string[]]$Clients = @(), [bool]$UseName = $true, [string]$Uri = '')
-    [pscustomobject]@{ Id = $Id; Label = $Label; Kind = $Kind; Exe = $Exe; Arguments = $Arguments; Clients = @($Clients); UseName = $UseName; Uri = $Uri }
+          [string]$Arguments = '', [string[]]$Clients = @(), [bool]$UseName = $true, [string]$Uri = '',
+          # Clients that must all be installed (Clients needs any one of its list).
+          [string[]]$Requires = @(),
+          # Clients that must not be installed (they replace files this mode runs on).
+          [string[]]$Excludes = @(),
+          [bool]$Elevate = $false, [bool]$NoDefaultArguments = $false,
+          # Values written to a JSON settings file in the game folder before starting:
+          # @{ File = 'x.json'; Values = @{ 'section.key' = 'value' }; NameKey = 'section.key' }.
+          $Config = $null)
+    [pscustomobject]@{ Id = $Id; Label = $Label; Kind = $Kind; Exe = $Exe; Arguments = $Arguments; Clients = @($Clients); UseName = $UseName; Uri = $Uri
+        Requires = @($Requires); Excludes = @($Excludes); Elevate = $Elevate; NoDefaultArguments = $NoDefaultArguments; Config = $Config }
+}
+
+# Catalogue entries for the files of one release archive: each is taken out of the
+# archive (downloaded once, SHA-256 checked) and checked against its own SHA-256.
+function Get-ArchiveAssetList {
+    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][int64]$Size, [Parameter(Mandatory)][string]$Sha256, [Parameter(Mandatory)][object[]]$Entries)
+    $archive = [pscustomobject]@{ Url = $Url; Size = $Size; Sha256 = $Sha256 }
+    foreach ($entry in $Entries) { [pscustomobject]@{ Path = [string]$entry[0]; Entry = [string]$entry[0]; Size = [int64]$entry[1]; Sha256 = [string]$entry[2]; Archive = $archive } }
 }
 
 # The Plutonium bootstrapper and the AlterWare launcher are shared by several games.
@@ -2654,17 +2687,73 @@ function Get-GameCatalog {
     $cod4Deny = @('iw3mp.exe')
     $cod4Derive = @{ 'miles32.dll' = 'mss32.dll' }
     @(
+        # CoD1 and UO share one Steam folder. Versions: Steam's own files; 1.1 (the 1.1
+        # game files, imported from the player's own copy, with CoD1x's CoDMP_old.exe);
+        # 1.1x (CoD1x's official release on top of 1.1). UO 1.51 imports its 1.51 files
+        # the same way; 1.51x adds UOx, built from its official source, and a copy of the
+        # 1.51 CoDUOMP.exe that loads it (see New-ImportRenamedExecutable).
         [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(2620); Detect = 'steam'
-            ValidFiles = @('CoDSP.exe', 'CoDMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
-            NeedsElevation = $false; DpiFix = @('CoDSP.exe', 'CoDMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @(); Note = 'Plays with your own executables. The CoD1x client is not installed: it needs its own patched copy of CoDMP.exe.'
-            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'CoDSP.exe'), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDMP.exe'))
+            ValidFiles = @('CoDSP.exe', 'CoDMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000 +set cl_motd 0'
+            NeedsElevation = $false; DpiFix = @('CoDSP.exe', 'CoDMP.exe', 'CoDMP_old.exe'); CdKey = 'cod1'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            RegistryKey = 'Call of Duty'
+            Clients = @(
+                (New-CatalogClient -Id 'cod1-v15' -Name 'CoD 1.5 files' -Source 'import' -RegistryVersion '1.5' -Conflicts @('cod1-v11', 'cod1x') -Description 'The retail 1.5 files (Steam''s build differs in these), imported from your own copy of Call of Duty 1.5. Only needed if a 1.5 server rejects the Steam version.' -Assets @(
+                    [pscustomobject]@{ Path = 'CoDMP.exe'; Size = 1830912; Crc32 = '59B8B6DF' },
+                    [pscustomobject]@{ Path = 'CoDSP.exe'; Size = 2899712; Crc32 = 'C055244B' },
+                    [pscustomobject]@{ Path = 'Main/game_mp_x86.dll'; Size = 503808; Crc32 = 'F4747D63' },
+                    [pscustomobject]@{ Path = 'Main/cgame_mp_x86.dll'; Size = 544768; Crc32 = 'E1D55B51' },
+                    [pscustomobject]@{ Path = 'Main/ui_mp_x86.dll'; Size = 274432; Crc32 = '8E0553C1' },
+                    [pscustomobject]@{ Path = 'Main/pakb.pk3'; Size = 5087181; Crc32 = '13E84AC9' },
+                    [pscustomobject]@{ Path = 'localization.txt'; Size = 2069; Crc32 = '1CE5F860' })),
+                (New-CatalogClient -Id 'cod1-v11' -Name 'CoD 1.1 files' -Source 'import' -RegistryVersion '1.1' -Conflicts @('cod1-v15') -Description 'The 1.1 game files, imported from your own copy of Call of Duty 1.1 (a retail install, a backup or the disc).' -Assets @(
+                    [pscustomobject]@{ Path = 'Main/pak0.pk3'; Size = 167014921; Crc32 = '4D8A1EC3' },
+                    [pscustomobject]@{ Path = 'Main/game_mp_x86.dll'; Size = 483328; Crc32 = '94124316' },
+                    [pscustomobject]@{ Path = 'Main/cgame_mp_x86.dll'; Size = 536576; Crc32 = '923DD9EE' },
+                    [pscustomobject]@{ Path = 'Main/ui_mp_x86.dll'; Size = 270336; Crc32 = '8D23A8B4' },
+                    [pscustomobject]@{ Path = 'localization.txt'; Size = 2069; Crc32 = '1CE5F860' },
+                    [pscustomobject]@{ Path = 'CoDSP.exe'; Size = 1712128; Crc32 = 'F7DBC266' },
+                    [pscustomobject]@{ Path = 'gamex86.dll'; Size = 737280; Crc32 = 'FA15B6F1' },
+                    [pscustomobject]@{ Path = 'cgamex86.dll'; Size = 462848; Crc32 = 'BFF6E693' },
+                    [pscustomobject]@{ Path = 'uix86.dll'; Size = 253952; Crc32 = 'BDAABBD7' })),
+                (New-CatalogClient -Id 'cod1x' -Name 'CoD1x' -Source 'github' -Conflicts @('cod1-v15') -ReleaseRepo 'xtnded/codextended-client' -ReleaseTag '2697' -Assets @(
+                    [pscustomobject]@{ Path = 'cod1x.dll'; Entry = 'cod1x.dll'; Size = 1107968; Sha256 = '28ce7ea5062deb6d8309c66a5a9e8dcc070c64e413da8e8bd62526ef13947c73'
+                        Archive = [pscustomobject]@{ Url = 'https://github.com/xtnded/codextended-client/releases/download/2697/CoD1x_Archive.zip'; Size = 2067295; Sha256 = 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d' } },
+                    [pscustomobject]@{ Path = 'CoDMP.exe'; Entry = 'CoDMP.exe'; Size = 1564672; Sha256 = '60737a486b3b66ca58d830b0a64f19687e02dec553577aa318c1a6d01a24c2e3'
+                        Archive = [pscustomobject]@{ Url = 'https://github.com/xtnded/codextended-client/releases/download/2697/CoD1x_Archive.zip'; Size = 2067295; Sha256 = 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d' } },
+                    [pscustomobject]@{ Path = 'CoDMP_old.exe'; Entry = 'CoDMP_old.exe'; Size = 1564672; Sha256 = '8ea7dee4299d92599f0b0ea79dbe762e584092bb71debd93365ed54b3177a6f2'
+                        Archive = [pscustomobject]@{ Url = 'https://github.com/xtnded/codextended-client/releases/download/2697/CoD1x_Archive.zip'; Size = 2067295; Sha256 = 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d' } })))
+            VersionClients = @('cod1x', 'cod1-v11', 'cod1-v15')
+            Note = 'Steam version: plays as it is. 1.1 and 1.1x: import the 1.1 files from your own copy once, then install CoD1x. Retail 1.5: import the 1.5 files only if a 1.5 server rejects the Steam version. Use Steam version puts the Steam files back.'
+            Modes = @(
+                (New-CatalogMode 'mp11x' 'Multiplayer 1.1x' -Exe 'CoDMP.exe' -Requires @('cod1-v11', 'cod1x') -Elevate $true),
+                (New-CatalogMode 'mp11' 'Multiplayer 1.1' -Exe 'CoDMP_old.exe' -Requires @('cod1-v11', 'cod1x') -Elevate $true),
+                (New-CatalogMode 'sp11' 'Campaign 1.1' -Exe 'CoDSP.exe' -Requires @('cod1-v11')),
+                (New-CatalogMode 'mp15' 'Multiplayer 1.5' -Exe 'CoDMP.exe' -Requires @('cod1-v15')),
+                (New-CatalogMode 'sp15' 'Campaign 1.5' -Exe 'CoDSP.exe' -Requires @('cod1-v15')),
+                (New-CatalogMode 'mp' 'Multiplayer (Steam)' -Exe 'CoDMP.exe' -Excludes @('cod1-v11', 'cod1x', 'cod1-v15')),
+                (New-CatalogMode 'sp' 'Campaign (Steam)' -Exe 'CoDSP.exe' -Excludes @('cod1-v11', 'cod1-v15')))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(2640); Detect = 'steam'
             ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
-            NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = 'coduo'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @(); Note = 'Plays with your own executables. The UOx client is not installed: it needs its own patched copy of CoDUOMP.exe.'
-            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'CoDUOSP.exe'), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDUOMP.exe'))
+            NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe', 'CoDUOMPx.exe'); CdKey = 'coduo'; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            RegistryKey = 'Call of Duty United Offensive'
+            Clients = @(
+                (New-CatalogClient -Id 'coduo-v151' -Name 'UO 1.51 files' -Source 'import' -RegistryVersion '1.51' -Description 'The 1.51 game files, imported from your own copy of United Offensive 1.51.' -Assets @(
+                    [pscustomobject]@{ Path = 'CoDUOMP.exe'; Size = 1904640; Crc32 = 'A04DDC77' },
+                    [pscustomobject]@{ Path = 'CoDUOSP.exe'; Size = 2999821; Crc32 = '71664E61' },
+                    [pscustomobject]@{ Path = 'uo/uomappack00.pk3'; Size = 39499720; Crc32 = '8228FF58' })),
+                (New-CatalogClient -Id 'uox' -Name 'UOx (1.51x)' -Source 'github' -ReleaseRepo 'LarkTheStar/fix-installer' -ReleaseTag 'uox-146bcb1' -ReleaseTagPrefix 'uox-' -Assets @(
+                    # Built by .github/workflows/build-uox.yml from xtnded/codextended-client-uo.
+                    # Named coduo.dll because CoD1x's cod1x.dll lives in the same folder.
+                    [pscustomobject]@{ Path = 'coduo.dll'; Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/uox-146bcb1/cod1x.dll'; Size = 270336; Sha256 = 'b30f4b9d414bce457fba6a20ee2e017eda992e65ed32a8411326b28c9dc427cd' },
+                    [pscustomobject]@{ Path = 'CoDUOMPx.exe'; PatchFrom = 'CoDUOMP.exe'; FromSize = 1904640; FromCrc32 = 'A04DDC77'; ImportFrom = 'mss32.dll'; ImportTo = 'coduo.dll'; Needs = 'UO 1.51 files' })))
+            VersionClients = @('uox', 'coduo-v151')
+            Note = 'Steam version: plays as it is. 1.51 and 1.51x: import the 1.51 files from your own copy once, then install UOx. UO uses Call of Duty''s 1.5 files, so Call of Duty must be on its Steam version.'
+            Modes = @(
+                (New-CatalogMode 'mp151x' 'Multiplayer 1.51x' -Exe 'CoDUOMPx.exe' -Requires @('coduo-v151', 'uox') -Excludes @('cod1-v11') -Elevate $true),
+                (New-CatalogMode 'mp151' 'Multiplayer 1.51' -Exe 'CoDUOMP.exe' -Requires @('coduo-v151') -Excludes @('cod1-v11')),
+                (New-CatalogMode 'mp' 'Multiplayer (Steam)' -Exe 'CoDUOMP.exe' -Excludes @('coduo-v151', 'cod1-v11')),
+                (New-CatalogMode 'sp' 'Campaign' -Exe 'CoDUOSP.exe' -Excludes @('cod1-v11')))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
             ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
@@ -2712,7 +2801,7 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'bo2'; Name = 'Call of Duty: Black Ops II'; Year = '2012'; SteamAppIds = @(202970); Detect = 'steam'
             ValidFiles = @('binkw32.dll', 't6mp.exe', 't6zm.exe', 't6sp.exe'); NameArgument = ''; DefaultArguments = ''
             NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = 't6Path'; ExeCheck = $null; ProjectUrl = ''
-            Clients = @((Get-PlutoniumClient), (New-CatalogClient -Id 't6sp-mod' -Name 'T6SP-Mod' -Source 'github' -Assets @(
+            Clients = @((Get-PlutoniumClient), (New-CatalogClient -Id 't6sp-mod' -Name 'T6SP-Mod' -Source 'github' -ReleaseRepo 'Rattpak/T6SP-Mod-Release' -ReleaseTag 'v1.0.0-Beta' -Assets @(
                     [pscustomobject]@{ Path = 'T6SP-Mod.exe'; Url = 'https://github.com/Rattpak/T6SP-Mod-Release/releases/download/v1.0.0-Beta/T6SP-Mod.exe'; Size = 11338240; Sha256 = '9224396f424e6c010f0e91f9893d453eb99c7265735fc785f9b5f166fa4394e7' },
                     [pscustomobject]@{ Path = 't6sp-mod.dll'; Url = 'https://github.com/Rattpak/T6SP-Mod-Release/releases/download/v1.0.0-Beta/t6sp-mod.dll'; Size = 2551296; Sha256 = '965d010e8fdfbb454fb830d4e3ee108218223cbb101585f2c8ae407e63e956b5' })))
             Note = 'Plutonium for multiplayer and Zombies (needs a free Plutonium account); T6SP-Mod for the campaign.'
@@ -2747,8 +2836,13 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'mwr'; Name = 'Call of Duty: Modern Warfare Remastered'; Year = '2017'; SteamAppIds = @(393080); Detect = 'steam'
             ValidFiles = @('h1_sp64_ship.exe', 'h1_mp64_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
             NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @((New-CatalogClient -Id 'h1-mod' -Name 'H1-Mod' -Manifest 'h1-mod/files.json' -Folder 'h1-mod/data/' -AppData 'h1-mod' -GameFiles @('h1-mod.exe') -Allow @('h1-mod.exe', 'cdata/*')))
-            Note = ''; Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'h1-mod.exe' -Arguments '-singleplayer' -Clients @('h1-mod')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'h1-mod.exe' -Arguments '-multiplayer' -Clients @('h1-mod')))
+            Clients = @((New-CatalogClient -Id 'h1-mod' -Name 'H1-Mod' -Manifest 'h1-mod/files.json' -Folder 'h1-mod/data/' -AppData 'h1-mod' -GameFiles @('h1-mod.exe') -Allow @('h1-mod.exe', 'cdata/*') -Conflicts @('h1-mod-aurora')),
+                (New-CatalogClient -Id 'h1-mod-aurora' -Name 'H1-Mod (AuroraMod release)' -Source 'github' -ReleaseRepo 'auroramod/h1-mod' -ReleaseTag 'v2.1.1' -Conflicts @('h1-mod') -Assets @(
+                    [pscustomobject]@{ Path = 'h1-mod.exe'; Url = 'https://github.com/auroramod/h1-mod/releases/download/v2.1.1/h1-mod.exe'; Size = 10039808; Sha256 = '4d818232ea6103682f74da480206017cf66a7da1ef1a24107355f6c5f709d308' })))
+            Note = 'Two sources for H1-Mod: CB''s build or AuroraMod''s own release (which updates its data itself when it starts). Install one of them.'
+            Modes = @((New-CatalogMode 'sp' 'Campaign' -Exe 'h1-mod.exe' -Arguments '-singleplayer' -Clients @('h1-mod')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'h1-mod.exe' -Arguments '-multiplayer' -Clients @('h1-mod')),
+                (New-CatalogMode 'sp-aurora' 'Campaign (AuroraMod)' -Exe 'h1-mod.exe' -Arguments '-singleplayer' -Clients @('h1-mod-aurora') -NoDefaultArguments $true),
+                (New-CatalogMode 'mp-aurora' 'Multiplayer (AuroraMod)' -Exe 'h1-mod.exe' -Arguments '-multiplayer' -Clients @('h1-mod-aurora') -NoDefaultArguments $true))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'mw2cr'; Name = 'Call of Duty: Modern Warfare 2 Campaign Remastered'; Year = '2020'; SteamAppIds = @(); Detect = 'folder'
             ValidFiles = @('MW2CR.exe', 'MW2 Campaign Remastered Launcher.exe'); NameArgument = ''; DefaultArguments = ''
@@ -2761,13 +2855,41 @@ function Get-GameCatalog {
             ValidFiles = @('BlackOps4.exe', 'BlackOps4_boot.exe', 'Black Ops 4 Launcher.exe'); NameArgument = '-name'; DefaultArguments = ''
             NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ProjectUrl = ''
             ExeCheck = [pscustomobject]@{ File = 'BlackOps4.exe'; Manifest = 'project-bo4.json'; Repair = 'In Battle.net: select Black Ops 4 > the gear next to Play > Scan and Repair.' }
-            Clients = @(); Note = 'Check game exe still works on your own install.'; Modes = @()
-            Available = $false; UnavailableReason = 'The Project BO4 client is not installable: its support files match nothing its authors publish, and the rest of its package is Black Ops 4''s own executable and game data.' }
+            # Shield's official launcher (NotNierPea/shield-launcher) goes into the game folder
+            # as its guide says; it downloads the client, the support mod and Target Range
+            # itself (run headless with --sync) and prepares the game each time it starts it.
+            # The player's own BlackOps4.exe and LPC files are backed up before it runs.
+            Clients = @((New-CatalogClient -Id 'shield' -Name 'Project BO4 (Shield)' -Source 'shield' -ReleaseRepo 'NotNierPea/shield-launcher' -ReleaseTag 'Release' -Protect @('BlackOps4.exe', 'LPC\*') -Watch @('project-bo4\*', 'LPC\*', 'XInput9_1_0.dll', 'discord_game_sdk.dll', 'project-bo4.json', 'BlackOps4.start', 'BlackOps4.exe') -Assets @(
+                    (Get-ArchiveAssetList -Url 'https://github.com/NotNierPea/shield-launcher/releases/download/Release/Project_BO4_Launcher_Update_1.1.4.zip' -Size 5127341 -Sha256 '04044074780574075616cc1050090fd2b7611467bbfcdfd9016059cda5fb3a8b' -Entries @(
+                        @('Launch Project BO4.exe', 112640, 'f9d7d012110511497e8f9fc585d7cba24eefbed894b5167d2443e55f8617db6d'),
+                        @('project-bo4/launcher/Shield_Launcher.exe', 644096, 'c90219d57eaaf01f6fa4f061a1797bc2224ff0f92b14d5a4fad04a1c7800065c'),
+                        @('project-bo4/launcher/images/launcher.jpg', 178864, 'c6256a24fa8d2103323af7c06c537d73b519ff1e488c60ffaab4ef3b19b8a19b'),
+                        @('project-bo4/launcher/images/launcher.png', 280896, '3299f8fba90c5e7f8cdcc666303113d3f80aa992217861ff426b194bbb427cf6'),
+                        @('project-bo4/launcher/Sounds/startup_sound.mp3', 4431360, 'c609c9f853698653f2543a43d1a805dcb40f2550de24d8fa336cceefab3b72dd'))))))
+            Note = 'Install downloads Shield''s client files (about 2.2 GB) with its own launcher. Play opens Shield''s launcher with your name and server set; press Play Client there. Repair fixes the black screen at start.'
+            Modes = @(
+                (New-CatalogMode 'online' 'Online' -Exe 'Launch Project BO4.exe' -Clients @('shield') -UseName $false -NoDefaultArguments $true -Config @{ File = 'project-bo4.json'; Values = @{ 'demonware.ipv4' = '78.157.42.107' }; NameKey = 'identity.name' }),
+                (New-CatalogMode 'offline' 'Offline' -Exe 'Launch Project BO4.exe' -Clients @('shield') -UseName $false -NoDefaultArguments $true -Config @{ File = 'project-bo4.json'; Values = @{ 'demonware.ipv4' = '127.0.0.1' }; NameKey = 'identity.name' }))
+            Repair = @('BlackOps4.start')
+            Available = $true; UnavailableReason = '' }
+        # HorizonMW's official launcher (api.horizonmw.org) goes into its own folder, as
+        # its guide says; it downloads the mod into the Modern Warfare Remastered folder.
         [pscustomobject]@{ Id = 'hmw'; Name = 'HorizonMW'; Year = '2024'; SteamAppIds = @(393080); Detect = 'steam'
             ValidFiles = @('h1_mp64_ship.exe'); NameArgument = '+set name'; DefaultArguments = ''
-            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = 'https://github.com/HorizonMW/HorizonMW-Client'
-            Clients = @(); Note = 'Runs on Modern Warfare Remastered.'; Modes = @()
-            Available = $false; UnavailableReason = 'HorizonMW publishes no client builds, only source code. Open the project to build it yourself (you need Modern Warfare Remastered).' }
+            NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = 'https://horizonmw.org/docs/installation'
+            Clients = @((New-CatalogClient -Id 'hmw-launcher' -Name 'HMW Launcher' -Source 'hmw' -AppData 'HorizonMW\Launcher' -ReleaseTag '2.0.0' -Watch @('*') -ConfirmCleanup $true -Assets @(
+                    (Get-ArchiveAssetList -Url 'https://s3.horizonmw.org/hmw/downloads/2.0.0_1788099721128_HMW_Launcher.zip' -Size 26444831 -Sha256 'ac366929246e0d8a97ea62e094c3661aa673f3835f1e8a2a01ce00904bcf9b94' -Entries @(
+                        @('HMW Launcher.exe', 45439936, 'acc4ebe3e829741fd7f91e08db33687fddf311bb5bd6513dd6f95e1aa59ac289'),
+                        @('HMW Updater.exe', 3575744, 'a7a2e6d41e025a51564f1e5d9bb94c7378302fed568854b94eff801f3a2fe10b'),
+                        @('av_libglesv2.dll', 4440576, 'caff1be1faee32f7c5bfba9162ee617c347aad40772caa9a1aff794e3a191420'),
+                        @('libHarfBuzzSharp.dll', 1607208, 'a54cfda99ffb965d4daa307c381763051ee638b629bfc0f424feb7a8046a7e36'),
+                        @('libSkiaSharp.dll', 9414216, '9a0d95e8caaa852c70d085af6a40a744242172ad9ea3fd6bc7599875a8a1dbcd'),
+                        @('version.txt', 8, '6d2c7d9bfcc2a2f40f75dbe57096bc8dd8c65511ed9dbe58abd08996f4618ff0'))))))
+            Note = 'Runs on Modern Warfare Remastered (Multiplayer installed). After installing, the HMW Launcher opens: set its install directory to your MWR folder (copied to the clipboard), then Verify game files. Needs the Visual C++ runtimes.'
+            Modes = @(
+                (New-CatalogMode 'play' 'Play' -Exe 'hmw-mod.exe' -Clients @('hmw-launcher')),
+                (New-CatalogMode 'launcher' 'HMW Launcher' -Kind 'client' -Exe 'HMW Launcher.exe' -Clients @('hmw-launcher') -UseName $false))
+            Available = $true; UnavailableReason = '' }
     )
 }
 
@@ -2944,26 +3066,249 @@ function Resolve-ClientTarget {
 
 function Get-FileSha1Hex { param([Parameter(Mandatory)][string]$Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToUpperInvariant() }
 
+# CRC-32 as zip archives record it. The player's own copies of older game files are
+# recognised by size and CRC-32 (the values in docs/cod1-uo-files.md).
+function Get-FileCrc32 {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not ('CodHqCrc32' -as [type])) {
+        Add-Type -TypeDefinition @'
+public static class CodHqCrc32 {
+    static readonly uint[] Table = Build();
+    static uint[] Build() {
+        var t = new uint[256];
+        for (uint i = 0; i < 256; i++) { uint c = i; for (int k = 0; k < 8; k++) { c = ((c & 1) != 0) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1); } t[i] = c; }
+        return t;
+    }
+    public static uint OfFile(string path) {
+        uint c = 0xFFFFFFFFu;
+        var buffer = new byte[1 << 20];
+        using (var f = System.IO.File.OpenRead(path)) {
+            int n;
+            while ((n = f.Read(buffer, 0, buffer.Length)) > 0) { for (int i = 0; i < n; i++) { c = Table[(c ^ buffer[i]) & 0xFF] ^ (c >> 8); } }
+        }
+        return c ^ 0xFFFFFFFFu;
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return ([CodHqCrc32]::OfFile($Path)).ToString('X8', [cultureinfo]::InvariantCulture)
+}
+
+# Writes a copy of an executable whose import table names one DLL in place of another
+# of the same length. That is the whole CoD1x exe patch: in CoD1x's own release the
+# patched CoDMP.exe differs from the original 1.1 one only in the imported name
+# mss32 -> cod1x, so the client DLL loads first and then loads mss32.dll itself. UOx
+# (built from the same project's UO source) is loaded the same way.
+function New-ImportRenamedExecutable {
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Destination, [Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To)
+    if ($From.Length -ne $To.Length) { throw 'The DLL names must have the same length.' }
+    $bytes = [IO.File]::ReadAllBytes($Source)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "$Source is not a Windows executable." }
+    $pe = [int][BitConverter]::ToUInt32($bytes, 0x3C)
+    if ($pe -lt 0 -or $pe + 24 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x00004550) { throw "$Source is not a PE file." }
+    $sectionCount = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    $optionalSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+    $optional = $pe + 24
+    $directories = if ([BitConverter]::ToUInt16($bytes, $optional) -eq 0x20B) { $optional + 112 } else { $optional + 96 }
+    $importRva = [int64][BitConverter]::ToUInt32($bytes, $directories + 8)
+    $sectionTable = $optional + $optionalSize
+    $toOffset = {
+        param([int64]$Rva)
+        for ($s = 0; $s -lt $sectionCount; $s++) {
+            $h = $sectionTable + 40 * $s
+            $va = [int64][BitConverter]::ToUInt32($bytes, $h + 12)
+            $span = [Math]::Max([int64][BitConverter]::ToUInt32($bytes, $h + 8), [int64][BitConverter]::ToUInt32($bytes, $h + 16))
+            if ($Rva -ge $va -and $Rva -lt $va + $span) { return [int]($Rva - $va + [int64][BitConverter]::ToUInt32($bytes, $h + 20)) }
+        }
+        return -1
+    }
+    $descriptor = & $toOffset $importRva
+    if ($importRva -eq 0 -or $descriptor -lt 0) { throw "$Source has no import table." }
+    $patched = 0
+    while ($descriptor + 20 -le $bytes.Length) {
+        $nameRva = [int64][BitConverter]::ToUInt32($bytes, $descriptor + 12)
+        if ($nameRva -eq 0) { break }
+        $nameOffset = & $toOffset $nameRva
+        if ($nameOffset -lt 0) { throw "$Source has a damaged import table." }
+        $end = $nameOffset
+        while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+        if ([Text.Encoding]::ASCII.GetString($bytes, $nameOffset, $end - $nameOffset) -ieq $From) {
+            $new = [Text.Encoding]::ASCII.GetBytes($To)
+            [Array]::Copy($new, 0, $bytes, $nameOffset, $new.Length)
+            $patched++
+        }
+        $descriptor += 20
+    }
+    if ($patched -ne 1) { throw "$Source imports $From $patched time(s); expected exactly once." }
+    $parent = Split-Path -Parent $Destination
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+    [IO.File]::WriteAllBytes($Destination, $bytes)
+}
+
+# The newest GitHub release of a repository (optionally the newest whose tag starts
+# with a prefix), with each asset's size and SHA-256 digest as GitHub publishes it.
+function Get-GitHubRelease {
+    param([Parameter(Mandatory)][string]$Repo, [string]$TagPrefix = '')
+    $headers = @{ 'User-Agent' = 'CallOfDutyHQ-SetupUtility/1.1'; 'Accept' = 'application/vnd.github+json' }
+    $uri = if ($TagPrefix) { "https://api.github.com/repos/$Repo/releases?per_page=30" } else { "https://api.github.com/repos/$Repo/releases/latest" }
+    $response = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 30
+    $releases = @($response)
+    $release = if ($TagPrefix) { $releases | Where-Object { ([string]$_.tag_name).StartsWith($TagPrefix, [StringComparison]::OrdinalIgnoreCase) -and -not $_.draft } | Select-Object -First 1 } else { $releases | Select-Object -First 1 }
+    if ($null -eq $release) { throw "$Repo has no matching release." }
+    $assets = foreach ($asset in @($release.assets)) {
+        $digest = [string]$asset.digest
+        [pscustomobject]@{ Name = [string]$asset.name; Size = [int64]$asset.size; Url = [string]$asset.browser_download_url
+            Sha256 = $(if ($digest -match '^sha256:([0-9a-fA-F]{64})$') { $Matches[1].ToLowerInvariant() } else { '' }) }
+    }
+    return [pscustomobject]@{ Tag = [string]$release.tag_name; Assets = @($assets) }
+}
+
+# The files a non-CB client installs. Pinned assets come from the catalogue; with
+# -Latest, a client that names its GitHub release takes the newest one instead, each
+# file still checked against the digest GitHub publishes for it (files taken out of a
+# release archive are covered by the archive's digest).
+function Get-ClientAssetList {
+    param([Parameter(Mandatory)]$Client, [switch]$Latest)
+    $assets = @($Client.Assets)
+    if ($Latest -and $Client.Source -eq 'hmw') {
+        # HorizonMW publishes its launcher through its own API; a new version is checked
+        # against the size (and checksum, when it gives one) the API reports.
+        $release = Get-HmwLatestRelease
+        if ($release.Version -eq $Client.ReleaseTag) { return [pscustomobject]@{ Tag = $release.Version; Assets = $assets } }
+        $archive = [pscustomobject]@{ Url = $release.Url; Size = $release.Size; Sha256 = $release.Sha256 }
+        $updated = foreach ($asset in $assets) { $copy = $asset.PSObject.Copy(); $copy.Archive = $archive; $copy.Size = 0; $copy.Sha256 = ''; $copy }
+        if (-not $release.Sha256) { Write-Warn "HorizonMW $($release.Version) has no published checksum; its size is checked instead." }
+        return [pscustomobject]@{ Tag = $release.Version; Assets = @($updated) }
+    }
+    if (-not $Latest -or -not $Client.ReleaseRepo) { return [pscustomobject]@{ Tag = [string]$Client.ReleaseTag; Assets = $assets } }
+    $release = Get-GitHubRelease -Repo $Client.ReleaseRepo -TagPrefix $Client.ReleaseTagPrefix
+    if ($release.Tag -eq $Client.ReleaseTag) { return [pscustomobject]@{ Tag = $release.Tag; Assets = $assets } }
+    $updated = foreach ($asset in $assets) {
+        $copy = $asset.PSObject.Copy()
+        if ($asset.Archive) {
+            $archiveName = ([string]$asset.Archive.Url -split '/')[-1]
+            $match = $release.Assets | Where-Object { $_.Name -ieq $archiveName } | Select-Object -First 1
+            if ($null -eq $match -or -not $match.Sha256) { throw "$($Client.Name) $($release.Tag) has no checked $archiveName." }
+            $copy.Archive = [pscustomobject]@{ Url = $match.Url; Size = $match.Size; Sha256 = $match.Sha256 }
+            $copy.Size = 0; $copy.Sha256 = ''
+        } elseif ($asset.Url) {
+            $assetName = ([string]$asset.Url -split '/')[-1]
+            $match = $release.Assets | Where-Object { $_.Name -ieq $assetName } | Select-Object -First 1
+            if ($null -eq $match -or -not $match.Sha256) { throw "$($Client.Name) $($release.Tag) has no checked $assetName." }
+            $copy.Url = $match.Url; $copy.Size = $match.Size; $copy.Sha256 = $match.Sha256
+        }
+        $copy
+    }
+    return [pscustomobject]@{ Tag = $release.Tag; Assets = @($updated) }
+}
+
+# Takes one file out of a downloaded release archive into staging. The archive is
+# downloaded once per install (resumable, SHA-256 checked) and kept in the staging
+# folder for the other files in it.
+function Save-ArchiveEntry {
+    param([Parameter(Mandatory)]$Step, [Parameter(Mandatory)][string]$StagePath, [Parameter(Mandatory)][string]$ArchiveCache, [string]$Label = '', [int]$RetryDelaySeconds = 3)
+    $archive = $Step.Asset.Archive
+    if (-not (Test-Path -LiteralPath $ArchiveCache)) { $null = New-Item -ItemType Directory -Path $ArchiveCache -Force }
+    $key = if ($archive.Sha256) { [string]$archive.Sha256 } else { [string]([Math]::Abs(([string]$archive.Url).GetHashCode())) }
+    $zipPath = Join-Path $ArchiveCache ($key + '.zip')
+    if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
+        $partial = $zipPath + '.download'
+        $null = Invoke-ResumableDownload -Url ([string]$archive.Url) -Destination $partial -Label $(if ($Label) { $Label } else { 'Downloading ' + (([string]$archive.Url -split '/')[-1]) }) -ExpectedSha256 ([string]$archive.Sha256) -RetryDelaySeconds $RetryDelaySeconds
+        Move-Item -LiteralPath $partial -Destination $zipPath -Force
+    }
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $entryName = ([string]$Step.Asset.Entry) -replace '\\', '/'
+    $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        $entry = $zip.Entries | Where-Object { ($_.FullName -replace '\\', '/') -ieq $entryName } | Select-Object -First 1
+        if ($null -eq $entry) { throw "$entryName is not in $(([string]$archive.Url -split '/')[-1])." }
+        $parent = Split-Path -Parent $StagePath
+        if (-not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $StagePath, $true)
+    } finally { $zip.Dispose() }
+    $bytes = (Get-Item -LiteralPath $StagePath).Length
+    $sha256 = Get-FileSha256 -Path $StagePath
+    if ($Step.Size -gt 0 -and $bytes -ne [int64]$Step.Size) { throw "$entryName from the archive is $bytes bytes, expected $($Step.Size)." }
+    if ($Step.Sha256 -and $sha256 -ne ([string]$Step.Sha256).ToLowerInvariant()) { throw "$entryName from the archive does not match its pinned SHA-256." }
+    return [pscustomobject]@{ Bytes = $bytes; Sha256 = $sha256; Sha1 = (Get-FileSha1Hex $StagePath) }
+}
+
+# Files of the player's own copy of a game, grouped by size, so a needed file is only
+# checksummed when its size already matches.
+function Get-ImportFolderIndex {
+    param([string]$Folder)
+    $index = @{}
+    if ([string]::IsNullOrWhiteSpace($Folder) -or -not (Test-Path -LiteralPath $Folder -PathType Container)) { return $index }
+    foreach ($file in @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        $size = [int64]$file.Length
+        if (-not $index.ContainsKey($size)) { $index[$size] = [System.Collections.Generic.List[object]]::new() }
+        $index[$size].Add($file)
+    }
+    return $index
+}
+
 # Works out what installing a client would do, without changing anything: which files
 # to download, which are already current, which of the game's own files are kept, which
 # names are made from the player's own files, and which manifest entries are skipped.
 function Get-ClientInstallPlan {
-    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, $Manifest = $null)
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, $Manifest = $null,
+          # The player's own copy of the game, for clients whose files are imported from it.
+          [string]$ImportFolder = '',
+          # Take the client's newest GitHub release instead of the pinned one.
+          [switch]$Latest)
     $steps = [System.Collections.Generic.List[object]]::new()
-    $manifestHash = ''; $base = ''
+    $manifestHash = ''; $base = ''; $releaseTag = [string]$Client.ReleaseTag
     if ($Client.Source -eq 'cb') {
         if ($null -eq $Manifest) { $Manifest = Get-ClientManifest -Manifest $Client.Manifest }
         $manifestHash = $Manifest.ManifestHash; $base = $Manifest.Base
-        $entries = @($Manifest.Entries | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = $_.Size; Sha1 = $_.Sha1; Sha256 = ''; Dest = $_.Dest; Url = '' } })
+        $entries = @($Manifest.Entries | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = $_.Size; Sha1 = $_.Sha1; Sha256 = ''; Dest = $_.Dest; Url = ''; Asset = $null } })
     } else {
-        $entries = @($Client.Assets | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = [int64]$_.Size; Sha1 = ''; Sha256 = [string]$_.Sha256; Dest = 'game'; Url = [string]$_.Url } })
+        $assetList = Get-ClientAssetList -Client $Client -Latest:$Latest
+        $releaseTag = $assetList.Tag
+        $entries = @($assetList.Assets | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = [int64]$_.Size; Sha1 = ''; Sha256 = [string]$_.Sha256; Dest = [string]$_.Dest; Url = [string]$_.Url; Asset = $_ } })
     }
     $previous = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
+    $importIndex = $null
+    $crcCache = @{}
+    $crcOf = { param([string]$File) $key = $File.ToLowerInvariant(); if (-not $crcCache.ContainsKey($key)) { $crcCache[$key] = Get-FileCrc32 -Path $File }; $crcCache[$key] }
     foreach ($entry in $entries) {
         $verdict = if ($Client.Source -eq 'cb') { Get-ClientEntryVerdict -Client $Client -Path $entry.Path } else { 'allow' }
         $target = Resolve-ClientTarget -Client $Client -Path $entry.Path -Dest $entry.Dest -GameFolder $GameFolder
         $step = [pscustomobject]@{ Path = $entry.Path; Verdict = $verdict; Action = ''; Dest = $target.Dest; Root = $target.Root; Target = $target.Target; Relative = $target.Relative
-            Size = $entry.Size; Sha1 = $entry.Sha1; Sha256 = $entry.Sha256; Url = $entry.Url; DeriveFrom = '' }
+            Size = $entry.Size; Sha1 = $entry.Sha1; Sha256 = $entry.Sha256; Url = $entry.Url; DeriveFrom = ''; Kind = 'file'; Asset = $entry.Asset; Crc32 = '' }
+        $asset = $entry.Asset
+        if ($asset -and $asset.Crc32) {
+            # A file from the player's own copy of the game: recognised by size and CRC-32.
+            $step.Kind = 'import'; $step.Crc32 = ([string]$asset.Crc32).ToUpperInvariant()
+            if ((Test-Path -LiteralPath $target.Target -PathType Leaf) -and (Get-Item -LiteralPath $target.Target).Length -eq $entry.Size -and (& $crcOf $target.Target) -eq $step.Crc32) { $step.Action = 'current'; $steps.Add($step); continue }
+            if ($null -eq $importIndex) { $importIndex = Get-ImportFolderIndex -Folder $ImportFolder }
+            $candidates = @()
+            if ($importIndex.ContainsKey([int64]$entry.Size)) {
+                $leaf = ($entry.Path -split '/')[-1]
+                $candidates = @($importIndex[[int64]$entry.Size] | Sort-Object @{ Expression = { if ($_.Name -ieq $leaf) { 0 } else { 1 } } })
+            }
+            foreach ($candidate in $candidates) { if ((& $crcOf $candidate.FullName) -eq $step.Crc32) { $step.DeriveFrom = $candidate.FullName; break } }
+            $step.Action = if ($step.DeriveFrom) { 'derive' } else { 'derive-missing' }
+            $steps.Add($step); continue
+        }
+        if ($asset -and $asset.PatchFrom) {
+            # A copy of one of the game's own executables that loads the client DLL.
+            $step.Kind = 'patch'
+            $sourceTarget = (Resolve-ClientTarget -Client $Client -Path ([string]$asset.PatchFrom) -Dest 'game' -GameFolder $GameFolder).Target
+            $step.DeriveFrom = $sourceTarget
+            if (-not (Test-Path -LiteralPath $sourceTarget -PathType Leaf) -or (Get-Item -LiteralPath $sourceTarget).Length -ne [int64]$asset.FromSize -or (& $crcOf $sourceTarget) -ne ([string]$asset.FromCrc32).ToUpperInvariant()) {
+                $step.Action = 'derive-missing'; $steps.Add($step); continue
+            }
+            $probe = Join-Path $env:TEMP ('codhq-patch-' + [guid]::NewGuid().ToString('N') + '.exe')
+            try {
+                New-ImportRenamedExecutable -Source $sourceTarget -Destination $probe -From ([string]$asset.ImportFrom) -To ([string]$asset.ImportTo)
+                $step.Sha256 = Get-FileSha256 -Path $probe; $step.Size = (Get-Item -LiteralPath $probe).Length
+            } finally { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
+            $step.Action = if ((Test-Path -LiteralPath $target.Target -PathType Leaf) -and (Get-FileSha256 -Path $target.Target) -eq $step.Sha256) { 'current' } else { 'patch' }
+            $steps.Add($step); continue
+        }
+        if ($asset -and $asset.Archive) { $step.Kind = 'archive' }
         switch ($verdict) {
             'skip' { $step.Action = 'skip' }
             'deny' { $step.Action = 'keep' }
@@ -2997,16 +3342,22 @@ function Get-ClientInstallPlan {
         }
         $steps.Add($step)
     }
-    return [pscustomobject]@{ Client = $Client; GameFolder = $GameFolder; ManifestHash = $manifestHash; Base = $base; Steps = $steps.ToArray(); Previous = $previous }
+    return [pscustomobject]@{ Client = $Client; GameFolder = $GameFolder; ManifestHash = $manifestHash; Base = $base; Steps = $steps.ToArray(); Previous = $previous; ReleaseTag = $releaseTag; ImportFolder = $ImportFolder }
 }
 
 # Downloads one planned file into staging, trying the plan's source first and the
 # other CB sources after it.
 function Save-ClientFile {
-    param([Parameter(Mandatory)]$Step, [Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$StagePath, [int]$RetryDelaySeconds = 3)
+    param([Parameter(Mandatory)]$Step, [Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$StagePath, [int]$RetryDelaySeconds = 3, [string]$ArchiveCache = '')
     $parent = Split-Path -Parent $StagePath
     if (-not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
     $label = "Downloading $($Plan.Client.Name): $($Step.Path)"
+    if ($Step.Kind -eq 'archive') {
+        if (-not $ArchiveCache) { $ArchiveCache = Join-Path (Split-Path -Parent $StagePath) '_archives' }
+        $result = Save-ArchiveEntry -Step $Step -StagePath $StagePath -ArchiveCache $ArchiveCache -Label "Downloading $($Plan.Client.Name)" -RetryDelaySeconds $RetryDelaySeconds
+        Write-Progress -Activity "Downloading $($Plan.Client.Name)" -Completed
+        return $result
+    }
     if ($Plan.Client.Source -ne 'cb') {
         $result = Invoke-ResumableDownload -Url $Step.Url -Destination $StagePath -Label $label -ExpectedSha256 $Step.Sha256 -RetryDelaySeconds $RetryDelaySeconds -PassThru
         Write-Progress -Activity $label -Completed
@@ -3039,33 +3390,80 @@ function New-TrackedDirectory {
     return $missing.ToArray()
 }
 
+# Files under a client's Protect / Watch patterns (relative to the game folder):
+# 'name' is one file, 'dir\*' every file below dir, '*' every file of the game. The
+# installer's own records and backups, and the players2 settings folder, never count.
+function Get-WatchedGameFiles {
+    param([Parameter(Mandatory)][string]$GameFolder, [string[]]$Patterns = @())
+    $found = [System.Collections.Generic.List[string]]::new()
+    $root = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    foreach ($pattern in @($Patterns)) {
+        $pattern = ([string]$pattern).Replace('/', '\')
+        if ($pattern -eq '*' -or $pattern.EndsWith('\*')) {
+            $dir = if ($pattern -eq '*') { $root } else { Join-Path $root $pattern.Substring(0, $pattern.Length - 2) }
+            if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+            foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue)) { $found.Add($file.FullName.Substring($root.Length + 1)) }
+        } elseif (Test-Path -LiteralPath (Join-Path $root $pattern) -PathType Leaf) { $found.Add($pattern) }
+    }
+    return @($found | Where-Object { $_ -notlike '.codhq-*' -and $_ -notlike 'players2\*' } | Sort-Object -Unique)
+}
+
 function Install-GameClient {
-    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3)
+    param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3,
+          # The player's own copy of the game, for clients whose files are imported from it.
+          [string]$ImportFolder = '',
+          # Take the newest release of a GitHub client instead of the pinned one.
+          [switch]$Latest)
     $game = Get-CatalogGame -Id $GameId
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
     if ($null -eq $client) { throw "$($game.Name) has no client '$ClientId'." }
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
     if (-not $GameFolder -or -not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    foreach ($other in @($client.Conflicts)) {
+        if (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $other) {
+            $otherName = ($game.Clients | Where-Object { $_.Id -eq $other } | Select-Object -First 1).Name
+            if (-not $otherName) { $otherName = $other }
+            throw "$($client.Name) and $otherName replace the same files and cannot be installed together. Remove $otherName first; nothing was changed."
+        }
+    }
 
     Write-Info "Checking what $($client.Name) needs in $GameFolder ..."
-    $plan = Get-ClientInstallPlan -Client $client -GameFolder $GameFolder -Manifest $Manifest
+    if ($ImportFolder) { Write-Info "Looking for the files in your copy: $ImportFolder" }
+    $plan = Get-ClientInstallPlan -Client $client -GameFolder $GameFolder -Manifest $Manifest -ImportFolder $ImportFolder -Latest:$Latest
     $missing = @($plan.Steps | Where-Object { $_.Action -eq 'derive-missing' })
     if ($missing.Count -gt 0) {
-        $names = ($missing | ForEach-Object { (Split-Path -Leaf $_.DeriveFrom) + ' (for ' + $_.Path + ')' }) -join ', '
+        $imports = @($missing | Where-Object { $_.Kind -eq 'import' })
+        $patches = @($missing | Where-Object { $_.Kind -eq 'patch' })
+        $derived = @($missing | Where-Object { $_.Kind -ne 'import' -and $_.Kind -ne 'patch' })
+        if ($imports.Count -gt 0) {
+            $list = ($imports | ForEach-Object { [string]::Format([cultureinfo]::InvariantCulture, '{0} ({1:N0} bytes, CRC-32 {2})', $_.Path, $_.Size, $_.Crc32) }) -join '; '
+            $where = if ($ImportFolder) { 'were not found in ' + $ImportFolder } else { 'are needed; use Import and pick the folder of your own copy' }
+            throw ($client.Name + ': these files from your own copy of ' + $game.Name + ' ' + $where + ': ' + $list + '. Nothing was changed.')
+        }
+        if ($patches.Count -gt 0) {
+            $needs = ($patches | ForEach-Object { if ($_.Asset.Needs) { [string]$_.Asset.Needs } else { [string]$_.Asset.PatchFrom } } | Select-Object -Unique) -join ', '
+            throw "$($client.Name) needs $needs first ($(($patches | ForEach-Object { $_.Asset.PatchFrom }) -join ', ') must be that version). Nothing was changed."
+        }
+        $names = ($derived | ForEach-Object { (Split-Path -Leaf $_.DeriveFrom) + ' (for ' + $_.Path + ')' }) -join ', '
         throw "$($client.Name) needs the game's original $names, but the file in your game folder is not the original build. Nothing was changed. Verify the game files in Steam, then try again."
     }
+    $placing = @('download', 'current', 'derive', 'patch')
     # Two clients that put different versions of the same file in place cannot be
     # installed together.
     $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $client.Id
-    foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) {
+    foreach ($step in @($plan.Steps | Where-Object { $_.Action -in $placing })) {
         $owner = $owners[$step.Target.ToLowerInvariant()]
         if ($owner -and $step.Sha1 -and $owner.Sha1 -and $owner.Sha1 -ne $step.Sha1) {
             throw "$($client.Name) and $($owner.ClientId) both replace $($step.Path) with different files. Remove $($owner.ClientId) first; nothing was changed."
         }
+        if ($owner -and -not $step.Sha1 -and $step.Action -ne 'current') {
+            throw "$($client.Name) would replace $($step.Path), which $($owner.ClientId) placed. Remove $($owner.ClientId) first; nothing was changed."
+        }
     }
 
     $downloads = @($plan.Steps | Where-Object { $_.Action -eq 'download' })
+    $patchSteps = @($plan.Steps | Where-Object { $_.Action -eq 'patch' })
     $stage = Join-Path $env:TEMP ('codhq-client-' + [guid]::NewGuid().ToString('N'))
     $journal = [System.Collections.Generic.List[object]]::new()
     $createdDirs = [System.Collections.Generic.List[string]]::new()
@@ -3073,20 +3471,40 @@ function Install-GameClient {
     if ($plan.Previous) { foreach ($b in @($plan.Previous.Backups)) { $backups.Add([pscustomobject]@{ Target = [string]$b.Target; Backup = [string]$b.Backup }) } }
     if ($plan.Previous) { foreach ($d in @($plan.Previous.CreatedDirs)) { $createdDirs.Add([string]$d) } }
     $hashes = @{}
+    $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $client.Id
+    # What the folder held before the client's own launcher first ran (kept across updates).
+    $snapshot = if ($plan.Previous -and $null -ne $plan.Previous.Snapshot) { @($plan.Previous.Snapshot) } elseif (@($client.Watch).Count -gt 0) { @(Get-WatchedGameFiles -GameFolder $GameFolder -Patterns $client.Watch) } else { @() }
+    $registryBackup = if ($plan.Previous) { [string]$plan.Previous.RegistryBackup } else { '' }
     try {
         $index = 0
         foreach ($step in $downloads) {
             $index++
-            Write-Info ("Downloading {0}/{1}: {2} ({3:N1} MB)" -f $index, $downloads.Count, $step.Path, ($step.Size / 1MB))
-            $result = Save-ClientFile -Step $step -Plan $plan -StagePath (Join-Path $stage ($step.Path -replace '/', '\')) -RetryDelaySeconds $RetryDelaySeconds
+            Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Downloading {0}/{1}: {2} ({3:N1} MB)', $index, $downloads.Count, $step.Path, ($step.Size / 1MB)))
+            $result = Save-ClientFile -Step $step -Plan $plan -StagePath (Join-Path $stage ($step.Path -replace '/', '\')) -RetryDelaySeconds $RetryDelaySeconds -ArchiveCache (Join-Path $stage '_archives')
             $hashes[$step.Target] = $result
         }
         if ($downloads.Count -gt 0) { Write-Ok "All $($downloads.Count) file(s) downloaded and checked." }
+        foreach ($step in $patchSteps) {
+            $staged = Join-Path $stage ($step.Path -replace '/', '\')
+            New-ImportRenamedExecutable -Source $step.DeriveFrom -Destination $staged -From ([string]$step.Asset.ImportFrom) -To ([string]$step.Asset.ImportTo)
+            if ((Get-FileSha256 -Path $staged) -ne $step.Sha256) { throw "The copy of $($step.Asset.PatchFrom) for $($client.Name) did not come out as checked." }
+            Write-Ok "Made $($step.Path) from your $($step.Asset.PatchFrom) (it loads $($step.Asset.ImportTo))."
+        }
 
-        $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $client.Id
+        # Game files a launcher-type client's launcher replaces later: kept before it runs.
+        foreach ($relative in @(Get-WatchedGameFiles -GameFolder $GameFolder -Patterns $client.Protect)) {
+            $full = Join-Path $GameFolder $relative
+            if (@($backups | Where-Object { $_.Target -ieq $full }).Count -gt 0 -or $owners.ContainsKey($full.ToLowerInvariant())) { continue }
+            $backupPath = Join-Path $backupRoot ('protect\' + $relative)
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $backupPath) -Force
+            Copy-Item -LiteralPath $full -Destination $backupPath -Force -ErrorAction Stop
+            $backups.Add([pscustomobject]@{ Target = $full; Backup = $backupPath })
+        }
+        if (@($client.Protect).Count -gt 0) { Write-Ok "Your own $(@($client.Protect) -join ', ') are backed up." }
+
         $previousTargets = @{}
         if ($plan.Previous) { foreach ($f in @($plan.Previous.Files)) { $previousTargets[([string]$f.Target).ToLowerInvariant()] = $true } }
-        $writeSteps = @($plan.Steps | Where-Object { $_.Action -eq 'derive' }) + $downloads
+        $writeSteps = @($plan.Steps | Where-Object { $_.Action -eq 'derive' }) + $downloads + $patchSteps
         try {
             foreach ($step in $writeSteps) {
                 Test-SafeGameDestination -TargetRoot $step.Root -Destination $step.Target
@@ -3119,7 +3537,7 @@ function Install-GameClient {
         # Files the client no longer ships: put back the original if one was replaced,
         # otherwise delete them (unless another client still uses them).
         $keepTargets = @{}
-        foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) { $keepTargets[$step.Target.ToLowerInvariant()] = $true }
+        foreach ($step in @($plan.Steps | Where-Object { $_.Action -in $placing })) { $keepTargets[$step.Target.ToLowerInvariant()] = $true }
         if ($plan.Previous) {
             foreach ($old in @($plan.Previous.Files)) {
                 $oldTarget = [string]$old.Target
@@ -3131,33 +3549,53 @@ function Install-GameClient {
             }
         }
 
-        $files = foreach ($step in @($plan.Steps | Where-Object { $_.Action -in 'download', 'current', 'derive' })) {
+        if ($client.RegistryVersion -and $game.RegistryKey -and -not $registryBackup) {
+            $registryBackup = Set-GameVersionRegistry -Game $game -GameFolder $GameFolder -Version $client.RegistryVersion
+        }
+
+        $files = foreach ($step in @($plan.Steps | Where-Object { $_.Action -in $placing })) {
             $sha256 = if ($hashes.ContainsKey($step.Target)) { $hashes[$step.Target].Sha256 } else { Get-FileSha256 -Path $step.Target }
             $sha1 = if ($step.Sha1) { $step.Sha1 } else { Get-FileSha1Hex $step.Target }
-            [pscustomobject]@{ Path = $step.Path; Dest = $step.Dest; Target = $step.Target; Size = $step.Size; Sha1 = $sha1; Sha256 = $sha256; Derived = ($step.Action -eq 'derive') }
+            $size = if ($step.Size -gt 0) { $step.Size } else { (Get-Item -LiteralPath $step.Target).Length }
+            [pscustomobject]@{ Path = $step.Path; Dest = $step.Dest; Target = $step.Target; Size = $size; Sha1 = $sha1; Sha256 = $sha256; Derived = ($step.Action -in 'derive', 'patch'); Kind = $step.Kind }
         }
         # The game's own files the client was built against (for the build check before Play).
         $expected = foreach ($step in @($plan.Steps | Where-Object { $_.Action -eq 'keep' })) { [pscustomobject]@{ Path = $step.Path; Target = $step.Target; Size = $step.Size; Sha1 = $step.Sha1 } }
         Write-ClientRecord -GameFolder $GameFolder -ClientId $client.Id -Record ([pscustomobject]@{
             Version = 1; GameId = $game.Id; ClientId = $client.Id; ClientName = $client.Name; Source = $client.Source; Manifest = $client.Manifest
-            ManifestHash = $plan.ManifestHash; InstalledAt = [DateTime]::UtcNow.ToString('o'); GameFolder = $GameFolder
-            Files = @($files); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs | Select-Object -Unique); ExpectedGameFiles = @($expected) })
+            ManifestHash = $plan.ManifestHash; ReleaseTag = $plan.ReleaseTag; InstalledAt = [DateTime]::UtcNow.ToString('o'); GameFolder = $GameFolder
+            Files = @($files); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs | Select-Object -Unique); ExpectedGameFiles = @($expected)
+            Snapshot = @($snapshot); RegistryBackup = $registryBackup })
     } finally {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
     $count = { param($action) @($plan.Steps | Where-Object { $_.Action -eq $action }).Count }
+    $imported = @($plan.Steps | Where-Object { $_.Action -eq 'derive' -and $_.Kind -eq 'import' }).Count
     Write-Ok "$($client.Name) is installed for $($game.Name)."
-    Write-Info ("Downloaded: {0}. Already current: {1}. Made from your own files: {2}. Your own game files kept: {3}. Skipped (not audited): {4}." -f (& $count 'download'), (& $count 'current'), (& $count 'derive'), (& $count 'keep'), (& $count 'skip'))
+    Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Downloaded: {0}. Imported from your copy: {1}. Already current: {2}. Made from your own files: {3}. Your own game files kept: {4}. Skipped (not audited): {5}.',
+        (& $count 'download'), $imported, (& $count 'current'), ((& $count 'derive') - $imported + (& $count 'patch')), (& $count 'keep'), (& $count 'skip')))
     foreach ($skipped in @($plan.Steps | Where-Object { $_.Action -eq 'skip' } | Select-Object -First 5)) { Write-Host "  skipped: $($skipped.Path)" -ForegroundColor DarkGray }
     if ($client.Id -eq 'plutonium') { Complete-PlutoniumSetup -Game $game -GameFolder $GameFolder }
-    return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = (& $count 'download'); Current = (& $count 'current'); Derived = (& $count 'derive'); Kept = (& $count 'keep'); Skipped = (& $count 'skip') }
+    if ($client.Source -eq 'shield') { $null = Invoke-ShieldContentSync -GameFolder $GameFolder }
+    if ($client.Source -eq 'hmw') { Complete-HmwSetup -Client $client -GameFolder $GameFolder }
+    return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = (& $count 'download'); Current = (& $count 'current'); Derived = (& $count 'derive') + (& $count 'patch'); Imported = $imported; Kept = (& $count 'keep'); Skipped = (& $count 'skip') }
 }
 
 # Same as installing: only changed files are downloaded, removed ones are cleaned up.
 function Update-GameClient {
     param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3)
-    $result = Install-GameClient -GameId $GameId -ClientId $ClientId -GameFolder $GameFolder -Manifest $Manifest -RetryDelaySeconds $RetryDelaySeconds
+    $game = Get-CatalogGame -Id $GameId
+    $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
+    if ($client -and $client.Source -eq 'import') { Write-Info "$($client.Name) are your own files; they do not change. Nothing to update."; return [pscustomobject]@{ Downloaded = 0 } }
+    if ($client -and $client.Source -eq 'shield') {
+        if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
+        $null = Invoke-ShieldContentSync -GameFolder $GameFolder
+        return [pscustomobject]@{ Downloaded = 0 }
+    }
+    # GitHub clients and the HMW launcher move to their newest release.
+    $latest = [bool]($client -and ($client.ReleaseRepo -or $client.Source -eq 'hmw'))
+    $result = Install-GameClient -GameId $GameId -ClientId $ClientId -GameFolder $GameFolder -Manifest $Manifest -RetryDelaySeconds $RetryDelaySeconds -Latest:$latest
     if ($result.Downloaded -eq 0) { Write-Ok 'Already up to date.' }
     return $result
 }
@@ -3174,7 +3612,16 @@ function Test-GameClientInstalled {
 # How many files an update would download (needs the network). 0 means up to date.
 function Get-GameClientUpdateCount {
     param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder)
-    $plan = Get-ClientInstallPlan -Client $Client -GameFolder $GameFolder
+    switch ($Client.Source) {
+        'import' { return 0 }
+        'shield' { $status = Invoke-ShieldLauncherHeadless -GameFolder $GameFolder; if (-not $status.Ok) { throw $(if ($status.Error) { $status.Error } else { 'Shield''s launcher could not check.' }) }; return [int]([bool]($status.Download -gt 0 -or $status.LauncherUpdate)) }
+        'hmw' {
+            $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
+            $installedVersion = if ($record -and $record.ReleaseTag) { [string]$record.ReleaseTag } else { $Client.ReleaseTag }
+            return [int]((Get-HmwLatestRelease).Version -ne $installedVersion)
+        }
+    }
+    $plan = Get-ClientInstallPlan -Client $Client -GameFolder $GameFolder -Latest:([bool]$Client.ReleaseRepo)
     return @($plan.Steps | Where-Object { $_.Action -eq 'download' }).Count
 }
 
@@ -3193,10 +3640,42 @@ function Remove-GameClient {
         if ($owners.ContainsKey($target.ToLowerInvariant())) { $shared++; continue }
         if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force -ErrorAction Stop; $removed++ }
     }
+    # A launcher-type client's launcher added files of its own: everything new since
+    # the install under its watched paths goes (after asking, for whole-game watches).
+    $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
+    if ($client -and @($client.Watch).Count -gt 0 -and $null -ne $record.Snapshot) {
+        $before = @{}
+        foreach ($path in @($record.Snapshot)) { $before[([string]$path).ToLowerInvariant()] = $true }
+        $added = @(Get-WatchedGameFiles -GameFolder $GameFolder -Patterns $client.Watch | Where-Object {
+            -not $before.ContainsKey($_.ToLowerInvariant()) -and -not $owners.ContainsKey((Join-Path $GameFolder $_).ToLowerInvariant()) })
+        if ($added.Count -gt 0) {
+            $delete = $true
+            if ($client.ConfirmCleanup) {
+                Write-Info "$($added.Count) file(s) were added to $GameFolder since $($record.ClientName) was installed, for example:"
+                foreach ($path in ($added | Select-Object -First 15)) { Write-Host "  $path" -ForegroundColor DarkGray }
+                $delete = ((Read-Host "Delete these $($added.Count) file(s) too? [y/N]") -match '^(y|yes)$')
+            }
+            if ($delete) {
+                $dirs = [System.Collections.Generic.List[string]]::new()
+                foreach ($path in $added) {
+                    $full = Join-Path $GameFolder $path
+                    if (Test-Path -LiteralPath $full -PathType Leaf) { Remove-Item -LiteralPath $full -Force -ErrorAction Stop; $removed++ }
+                    $dirs.Add((Split-Path -Parent $full))
+                }
+                foreach ($dir in @($dirs | Select-Object -Unique | Sort-Object Length -Descending)) {
+                    $walk = $dir
+                    while ($walk -and $walk.Length -gt $GameFolder.Length -and (Test-Path -LiteralPath $walk -PathType Container) -and -not (Get-ChildItem -LiteralPath $walk -Force | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $walk -Force -ErrorAction SilentlyContinue; $walk = Split-Path -Parent $walk
+                    }
+                }
+            } else { Write-Info 'The added files were kept.' }
+        }
+    }
     foreach ($backup in @($record.Backups)) {
         if ($owners.ContainsKey(([string]$backup.Target).ToLowerInvariant())) { continue }
         if (Test-Path -LiteralPath ([string]$backup.Backup) -PathType Leaf) { Copy-FileAtomically -Source ([string]$backup.Backup) -Destination ([string]$backup.Target); $restored++ }
     }
+    if ($record.RegistryBackup -and $game.RegistryKey) { Restore-GameVersionRegistry -Game $game -Backup ([string]$record.RegistryBackup) }
     foreach ($dir in @(@($record.CreatedDirs) | Sort-Object { ([string]$_).Length } -Descending)) {
         $dir = [string]$dir
         if ((Test-Path -LiteralPath $dir -PathType Container) -and -not (Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue }
@@ -3208,6 +3687,261 @@ function Remove-GameClient {
     Remove-Item -LiteralPath (Get-ClientRecordPath -GameFolder $GameFolder -ClientId $ClientId) -Force -ErrorAction Stop
     Write-Ok "$($record.ClientName) was removed from $($game.Name)."
     Write-Info "Removed files: $removed. Original game files put back: $restored. Kept because another client uses them: $shared."
+}
+
+# ==========================================
+# GAMES: VERSION REGISTRY VALUES (CoD1 / UO)
+# ==========================================
+# A retail install records InstallPath, InstallDrive, Language, Version and pb, which
+# the official patches and tools read (cod.pm's .reg files list the same values).
+# While an imported version is in place they are written for the player's own folder:
+# to HKCU's VirtualStore, which the game sees when it runs without administrator
+# rights, and, after one administrator prompt, to HKLM, which it sees with them. The
+# earlier values are recorded first and put back by Remove. CD keys in the same key
+# are never touched here.
+function Get-GameVersionValueNames { @('InstallPath', 'InstallDrive', 'Language', 'Version', 'pb') }
+
+function Get-GameRegistryLocation {
+    param([Parameter(Mandatory)]$Game)
+    [pscustomobject]@{
+        Hkcu = (Get-CdKeyRegistryRoot) + 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\' + $Game.RegistryKey
+        # The 32-bit view of HKLM\SOFTWARE\Activision\<key> (WOW6432Node on 64-bit Windows).
+        HklmSubkey = 'SOFTWARE\Activision\' + $Game.RegistryKey
+        HklmRegPath = 'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Activision\' + $Game.RegistryKey
+        UseHklm = (-not (Test-SandboxMode) -and [string]::IsNullOrWhiteSpace([string]$global:CdKeyRegistryRootOverride))
+    }
+}
+
+function Read-HklmGameValues {
+    param([Parameter(Mandatory)][string]$Subkey)
+    $values = [ordered]@{}
+    foreach ($name in (Get-GameVersionValueNames)) { $values[$name] = $null }
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        $key = $base.OpenSubKey($Subkey)
+        if ($key) { try { foreach ($name in (Get-GameVersionValueNames)) { $value = $key.GetValue($name); if ($null -ne $value) { $values[$name] = [string]$value } } } finally { $key.Dispose() } }
+    } catch { Write-Verbose 'HKLM not readable.' }
+    return $values
+}
+
+# Imports a .reg file into HKLM: directly when already elevated, otherwise through one
+# administrator prompt. Returns $true when reg.exe reported success.
+function Invoke-ElevatedRegImport {
+    param([Parameter(Mandatory)][string]$File)
+    $isAdmin = $false
+    try { $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $isAdmin = $false }
+    if ($isAdmin) { return ((Invoke-RegExe -Arguments @('import', $File)).ExitCode -eq 0) }
+    try {
+        $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\reg.exe') -ArgumentList @('import', ('"' + $File + '"')) -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+        return ($process.ExitCode -eq 0)
+    } catch { return $false }
+}
+
+function ConvertTo-RegFileText {
+    param([Parameter(Mandatory)][string]$RegPath, [Parameter(Mandatory)]$Values)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('Windows Registry Editor Version 5.00'); $lines.Add(''); $lines.Add('[' + $RegPath + ']')
+    foreach ($name in $Values.Keys) {
+        $value = $Values[$name]
+        if ($null -eq $value) { $lines.Add('"' + $name + '"=-') }
+        else { $lines.Add('"' + $name + '"="' + (([string]$value).Replace('\', '\\').Replace('"', '\"')) + '"') }
+    }
+    return (($lines -join "`r`n") + "`r`n")
+}
+
+function Set-GameVersionRegistry {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$Version)
+    $location = Get-GameRegistryLocation -Game $Game
+    $folder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\') + '\'
+    $wanted = [ordered]@{ InstallPath = $folder; InstallDrive = [IO.Path]::GetPathRoot($folder).TrimEnd('\'); Language = '1'; Version = $Version; pb = '1' }
+    $hkcuBefore = [ordered]@{}
+    foreach ($name in (Get-GameVersionValueNames)) {
+        $item = Get-ItemProperty -LiteralPath $location.Hkcu -Name $name -ErrorAction SilentlyContinue
+        $hkcuBefore[$name] = if ($null -ne $item) { [string]$item.$name } else { $null }
+    }
+    $previous = [pscustomobject]@{ Hkcu = [pscustomobject]$hkcuBefore; Hklm = $null }
+    if (-not (Test-Path -LiteralPath $location.Hkcu)) { $null = New-Item -Path $location.Hkcu -Force }
+    foreach ($name in $wanted.Keys) { New-ItemProperty -LiteralPath $location.Hkcu -Name $name -Value $wanted[$name] -PropertyType String -Force | Out-Null }
+    Write-Ok "$($Game.Name) registry values set for version $Version (your account)."
+    if ($location.UseHklm) {
+        $before = Read-HklmGameValues -Subkey $location.HklmSubkey
+        $file = Join-Path $env:TEMP ('codhq-version-' + [guid]::NewGuid().ToString('N') + '.reg')
+        try {
+            [IO.File]::WriteAllText($file, (ConvertTo-RegFileText -RegPath $location.HklmRegPath -Values $wanted), [Text.Encoding]::Unicode)
+            Write-Info 'Writing the same values for the whole computer (HKLM); Windows asks for administrator rights once.'
+            if (Invoke-ElevatedRegImport -File $file) { $previous.Hklm = [pscustomobject]$before; Write-Ok "$($Game.Name) registry values set for the computer." }
+            else { Write-Warn 'The computer-wide registry values were not written (the prompt was declined or failed). The game still finds them when it runs without administrator rights.' }
+        } finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+    }
+    return ($previous | ConvertTo-Json -Depth 4 -Compress)
+}
+
+function Restore-GameVersionRegistry {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$Backup)
+    $previous = $Backup | ConvertFrom-Json
+    $location = Get-GameRegistryLocation -Game $Game
+    if (Test-Path -LiteralPath $location.Hkcu) {
+        foreach ($name in (Get-GameVersionValueNames)) {
+            $value = $previous.Hkcu.$name
+            if ($null -eq $value) { Remove-ItemProperty -LiteralPath $location.Hkcu -Name $name -ErrorAction SilentlyContinue }
+            else { New-ItemProperty -LiteralPath $location.Hkcu -Name $name -Value ([string]$value) -PropertyType String -Force | Out-Null }
+        }
+    }
+    if ($null -ne $previous.Hklm -and $location.UseHklm) {
+        $values = [ordered]@{}
+        foreach ($name in (Get-GameVersionValueNames)) { $values[$name] = $previous.Hklm.$name }
+        $file = Join-Path $env:TEMP ('codhq-version-' + [guid]::NewGuid().ToString('N') + '.reg')
+        try {
+            [IO.File]::WriteAllText($file, (ConvertTo-RegFileText -RegPath $location.HklmRegPath -Values $values), [Text.Encoding]::Unicode)
+            if (Invoke-ElevatedRegImport -File $file) { Write-Ok "$($Game.Name) computer-wide registry values put back." }
+            else { Write-Warn "The computer-wide registry values of $($Game.Name) were not put back (the prompt was declined)." }
+        } finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+    }
+    Write-Ok "$($Game.Name) registry values put back as they were."
+}
+
+# ==========================================
+# GAMES: PROJECT BO4 (SHIELD) AND HORIZONMW LAUNCHERS
+# ==========================================
+function Get-ShieldLauncherPath { param([Parameter(Mandatory)][string]$GameFolder) Join-Path $GameFolder 'project-bo4\launcher\Shield_Launcher.exe' }
+
+# Runs Shield's launcher without its window: --check reports what it would download,
+# --sync downloads it (the launcher's own content updater, with its own checksums).
+# The result is the launcher's content-sync.log.
+function Invoke-ShieldLauncherHeadless {
+    param([Parameter(Mandatory)][string]$GameFolder, [switch]$Sync, [int]$TimeoutMinutes = 360)
+    $exe = Get-ShieldLauncherPath -GameFolder $GameFolder
+    $result = [pscustomobject]@{ Ok = $false; Ready = $false; Download = 0; LauncherUpdate = $false; Synced = $false; Error = ''; Log = @() }
+    if (Test-SandboxMode) {
+        Write-Host "[SANDBOX] Would run: `"$exe`" $(if ($Sync) { '--sync' } else { '--check' })" -ForegroundColor DarkYellow
+        $result.Ok = $true; $result.Ready = $true; $result.Synced = [bool]$Sync
+        return $result
+    }
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Shield's launcher is missing ($exe). Install Project BO4 again." }
+    $launcherDir = Split-Path -Parent $exe
+    $log = Join-Path $launcherDir 'content-sync.log'
+    Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    $process = Start-Process -FilePath $exe -ArgumentList $(if ($Sync) { '--sync' } else { '--check' }) -WorkingDirectory $launcherDir -WindowStyle Hidden -PassThru
+    $deadline = [DateTime]::UtcNow.AddMinutes($TimeoutMinutes)
+    $shown = 0
+    while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Seconds 2
+        Invoke-UiPump
+        if (Test-Path -LiteralPath $log) {
+            $lines = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue)
+            for (; $shown -lt $lines.Count; $shown++) { if ($lines[$shown] -match '^phase (.+) total (\d+)') { Write-Info ("Shield: {0} ({1})" -f $Matches[1], $Matches[2]) } }
+        }
+    }
+    if (-not $process.HasExited) { try { $process.Kill() } catch { Write-Verbose 'Already closed.' }; $result.Error = 'Shield''s launcher did not finish in time.'; return $result }
+    $result = ConvertFrom-ShieldSyncLog -Lines @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue)
+    if ($process.ExitCode -ne 0 -and -not $result.Error) { $result.Error = "Shield's launcher exited with code $($process.ExitCode)." }
+    return $result
+}
+
+# Reads the result lines Shield's launcher writes (launcher_main.cpp, run_headless):
+# "ok <0|1> ready <0|1> download <n> launcher_update <0|1> error <text>", per-component
+# lines, and with --sync "sync ok|failed <error>".
+function ConvertFrom-ShieldSyncLog {
+    param([string[]]$Lines = @())
+    $result = [pscustomobject]@{ Ok = $false; Ready = $false; Download = 0; LauncherUpdate = $false; Synced = $false; Error = ''; Log = @($Lines) }
+    foreach ($line in @($Lines)) {
+        if ($line -match '^ok (\d) ready (\d) download (\d+) launcher_update (\d) error ?(.*)$') {
+            $result.Ok = ($Matches[1] -eq '1'); $result.Ready = ($Matches[2] -eq '1'); $result.Download = [int64]$Matches[3]; $result.LauncherUpdate = ($Matches[4] -eq '1'); $result.Error = $Matches[5].Trim()
+        }
+        if ($line -match '^sync (ok|failed) ?(.*)$') { $result.Synced = ($Matches[1] -eq 'ok'); if ($Matches[1] -eq 'failed') { $result.Error = $Matches[2].Trim() } }
+    }
+    return $result
+}
+
+function Invoke-ShieldContentSync {
+    param([Parameter(Mandatory)][string]$GameFolder)
+    Write-Info 'Shield''s launcher is downloading the client, the support mod and Target Range (about 2.2 GB) ...'
+    $result = Invoke-ShieldLauncherHeadless -GameFolder $GameFolder -Sync
+    if ($result.Synced -or ($result.Ok -and $result.Ready -and $result.Download -eq 0)) { Write-Ok 'Shield''s files are downloaded and checked by its launcher.'; return $result }
+    Write-Warn "Shield's launcher did not finish its download: $(if ($result.Error) { $result.Error } else { 'no result' }). Use Update to try again, or open Shield's launcher (Play) and press Download all."
+    return $result
+}
+
+function Get-HmwLatestRelease {
+    $info = Invoke-RestMethod -Uri 'https://api.horizonmw.org/downloads/latest' -Headers @{ 'User-Agent' = 'CallOfDutyHQ-SetupUtility/1.1' } -TimeoutSec 30
+    $url = [string]$info.fileUrl
+    if ($url -notmatch '^https://([a-z0-9-]+\.)*horizonmw\.org/') { throw "HorizonMW's download address is not on horizonmw.org: $url" }
+    $checksum = [string]$info.checksum
+    [pscustomobject]@{ Version = [string]$info.version; Url = $url; Size = [int64]$info.fileSize
+        Sha256 = $(if ($checksum -match '^(sha256:)?([0-9a-fA-F]{64})$') { $Matches[2].ToLowerInvariant() } else { '' }) }
+}
+
+# The Microsoft Visual C++ 2015-2022 runtime (x64) that HorizonMW's guide asks for.
+function Test-VcRuntimeInstalled {
+    foreach ($path in 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64') {
+        $item = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+        if ($item -and [int]$item.Installed -eq 1) { return $true }
+    }
+    return $false
+}
+
+# After the launcher is in place, as HorizonMW's guide continues: point it at the MWR
+# folder, then Verify game files (which downloads the mod).
+function Complete-HmwSetup {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder)
+    if (-not (Test-VcRuntimeInstalled)) { Write-Warn 'The Visual C++ runtime HorizonMW needs is not installed. Get it from Microsoft: https://aka.ms/vs/17/release/vc_redist.x64.exe' }
+    try { [System.Windows.Forms.Clipboard]::SetText($GameFolder); Write-Info "Your MWR folder is on the clipboard: $GameFolder" } catch { Write-Info "Your MWR folder: $GameFolder" }
+    Write-Info 'In the HMW Launcher: cog button > Select Install Directory > paste the MWR folder, then press Verify game files, then Reverify game files. After that, Play works from this card.'
+    $launcher = Join-Path (Join-Path (Get-ClientAppDataRoot) $Client.AppData) 'HMW Launcher.exe'
+    if (Test-SandboxMode) { Write-Host "[SANDBOX] Would open: $launcher" -ForegroundColor DarkYellow; return }
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) { Start-Process -FilePath $launcher -WorkingDirectory (Split-Path -Parent $launcher); Write-Ok 'HMW Launcher opened.' }
+}
+
+# ==========================================
+# GAMES: WHEN A MODE CAN START
+# ==========================================
+function Get-CatalogClientName {
+    param([Parameter(Mandatory)][string]$Id, $Game = $null)
+    if ($Game) { $own = $Game.Clients | Where-Object { $_.Id -eq $Id } | Select-Object -First 1; if ($own) { return $own.Name } }
+    foreach ($game in Get-GameCatalog) { $client = $game.Clients | Where-Object { $_.Id -eq $Id } | Select-Object -First 1; if ($client) { return $client.Name } }
+    return $Id
+}
+
+# Why a mode cannot start right now, or '' when it can.
+function Get-ModeBlocker {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Mode, [Parameter(Mandatory)][string]$GameFolder)
+    if (@($Mode.Clients).Count -gt 0) {
+        $installed = @($Mode.Clients | Where-Object { Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_ })
+        if ($installed.Count -eq 0) { return ("$($Mode.Label) needs " + (($Mode.Clients | ForEach-Object { Get-CatalogClientName $_ $Game }) -join ' or ') + '. Use Install client first.') }
+    }
+    $missing = @($Mode.Requires | Where-Object { -not (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_) })
+    if ($missing.Count -gt 0) { return ("$($Mode.Label) needs " + (($missing | ForEach-Object { Get-CatalogClientName $_ $Game }) -join ' and ') + ' first.') }
+    $present = @($Mode.Excludes | Where-Object { Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_ })
+    if ($present.Count -gt 0) { return ("$($Mode.Label) runs on the Steam files, but " + (($present | ForEach-Object { Get-CatalogClientName $_ $Game }) -join ' and ') + ' replaced some of them. Use Steam version (on the card that installed them) first.') }
+    return ''
+}
+
+# Writes values into a client's JSON settings file (dotted keys: 'section.key'), keeping
+# everything else in it. A file that cannot be read is left alone.
+function Set-JsonSettingValues {
+    param([Parameter(Mandatory)][string]$Path, [hashtable]$Values = @{})
+    $data = [pscustomobject]@{}
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        try { $data = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { Write-Warn "$(Split-Path -Leaf $Path) could not be read; it was left alone."; return $false }
+        if ($data -isnot [pscustomobject]) { Write-Warn "$(Split-Path -Leaf $Path) is not a settings object; it was left alone."; return $false }
+    }
+    foreach ($key in $Values.Keys) {
+        $parts = ([string]$key) -split '\.'
+        $node = $data
+        for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+            $child = $node.PSObject.Properties[$parts[$i]]
+            if ($null -eq $child -or $child.Value -isnot [pscustomobject]) { $node | Add-Member -NotePropertyName $parts[$i] -NotePropertyValue ([pscustomobject]@{}) -Force; $child = $node.PSObject.Properties[$parts[$i]] }
+            $node = $child.Value
+        }
+        $node | Add-Member -NotePropertyName $parts[-1] -NotePropertyValue $Values[$key] -Force
+    }
+    $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temp, ($data | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temp -Destination $Path -Force -ErrorAction Stop
+    } catch { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue; throw }
+    return $true
 }
 
 # ==========================================
@@ -3365,11 +4099,17 @@ function Get-CatalogLaunchCommand {
         return [pscustomobject]@{ FilePath = (Join-Path (Get-PlutoniumRoot) 'bin\plutonium-launcher-win32.exe'); Arguments = 'plutonium://play/' + $Mode.Uri; WorkingDirectory = (Get-PlutoniumRoot); Elevate = $false }
     }
     $parts = [System.Collections.Generic.List[string]]::new()
-    if ($Game.DefaultArguments) { $parts.Add($Game.DefaultArguments) }
+    if ($Game.DefaultArguments -and -not $Mode.NoDefaultArguments) { $parts.Add($Game.DefaultArguments) }
     if ($Mode.Arguments) { $parts.Add($Mode.Arguments) }
     $name = Get-CleanPlayerName $PlayerName
     if ($name -and $Mode.UseName -and $Game.NameArgument) { $parts.Add($Game.NameArgument + ' "' + $name + '"') }
-    return [pscustomobject]@{ FilePath = (Join-Path $GameFolder $Mode.Exe); Arguments = ($parts -join ' '); WorkingDirectory = $GameFolder; Elevate = [bool]$Game.NeedsElevation }
+    $folder = $GameFolder
+    if ($Mode.Kind -eq 'client') {
+        # A launcher kept in the client's own folder (outside the game).
+        $client = $Game.Clients | Where-Object { $_.Id -eq @($Mode.Clients)[0] } | Select-Object -First 1
+        $folder = Join-Path (Get-ClientAppDataRoot) $client.AppData
+    }
+    return [pscustomobject]@{ FilePath = (Join-Path $folder $Mode.Exe); Arguments = ($parts -join ' '); WorkingDirectory = $folder; Elevate = ([bool]$Game.NeedsElevation -or [bool]$Mode.Elevate) }
 }
 
 function Start-CatalogGame {
@@ -3379,13 +4119,8 @@ function Start-CatalogGame {
     if ($null -eq $mode) { throw "$($game.Name) has no mode '$ModeId'." }
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
     if (-not $GameFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
-    if (@($mode.Clients).Count -gt 0) {
-        $installed = @($mode.Clients | Where-Object { Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_ })
-        if ($installed.Count -eq 0) {
-            $names = ($mode.Clients | ForEach-Object { $id = $_; ($game.Clients | Where-Object { $_.Id -eq $id }).Name }) -join ' or '
-            throw "$($mode.Label) needs $names. Use Install client first."
-        }
-    }
+    $blocker = Get-ModeBlocker -Game $game -Mode $mode -GameFolder $GameFolder
+    if ($blocker) { throw $blocker }
     $build = Get-GameBuildInfo -Game $game -GameFolder $GameFolder
     if ($build.Executable) { Write-Info ("Game build: {0} version {1}, {2:N0} bytes." -f $build.Executable, $(if ($build.Version) { $build.Version } else { 'unknown' }), $build.Size) }
     foreach ($m in $build.Mismatches) {
@@ -3396,7 +4131,15 @@ function Start-CatalogGame {
         Update-Plutonium -GameFolder $GameFolder
     }
     foreach ($exe in @($game.DpiFix)) { try { Set-DpiAwareFlag -Executable (Join-Path $GameFolder $exe) } catch { Write-Verbose 'DPI flag not set.' } }
-    $command = Get-CatalogLaunchCommand -Game $game -Mode $mode -GameFolder $GameFolder -PlayerName ([string](Get-AppSettings).PlayerName)
+    $playerName = [string](Get-AppSettings).PlayerName
+    if ($mode.Config) {
+        $values = @{}
+        foreach ($key in $mode.Config.Values.Keys) { $values[$key] = $mode.Config.Values[$key] }
+        $clean = Get-CleanPlayerName $playerName
+        if ($clean -and $mode.Config.NameKey) { $values[$mode.Config.NameKey] = $clean }
+        if (Set-JsonSettingValues -Path (Join-Path $GameFolder $mode.Config.File) -Values $values) { Write-Info "Settings written to $($mode.Config.File): $((($values.Keys | Sort-Object) | ForEach-Object { "$_ = $($values[$_])" }) -join ', ')" }
+    }
+    $command = Get-CatalogLaunchCommand -Game $game -Mode $mode -GameFolder $GameFolder -PlayerName $playerName
     if (Test-SandboxMode) {
         Write-Host ("[SANDBOX] Would start: `"{0}`" {1}" -f $command.FilePath, $command.Arguments) -ForegroundColor DarkYellow
         return $command
@@ -3469,6 +4212,9 @@ function Test-GameExecutable {
 function Get-CdKeySpec {
     param([Parameter(Mandatory)][string]$GameId)
     switch ($GameId) {
+        # Call of Duty 1.5 reads its key from the registry, 1.1 from main\codkey in the
+        # game folder (cod.pm's guide); both are written.
+        'cod1' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty'; ValueNames = @('codkey'); Hklm = 'SOFTWARE\Activision\Call of Duty'; KeyFile = 'Main\codkey' } }
         'cod2' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty 2'; ValueNames = @('codkey'); Hklm = 'SOFTWARE\Activision\Call of Duty 2' } }
         'coduo' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty United Offensive'; ValueNames = @('key', 'codkey'); Hklm = 'SOFTWARE\Activision\Call of Duty United Offensive' } }
         'cod4' { return [pscustomobject]@{ Subkey = 'SOFTWARE\Activision\Call of Duty 4'; ValueNames = @('codkey'); Hklm = '' } }
@@ -3556,8 +4302,24 @@ function Backup-GameCdKey {
     } else {
         [IO.File]::WriteAllText($file, "Windows Registry Editor Version 5.00`r`n`r`n; codhq: no key existed`r`n", [Text.Encoding]::Unicode)
     }
+    # The key file of games that keep one (CoD1 1.1): copied beside the .reg backup.
+    $keyFile = Get-CdKeyFilePath -Spec $spec -GameId $GameId
+    if ($keyFile) {
+        $copy = [IO.Path]::ChangeExtension($file, '.codkey')
+        if (Test-Path -LiteralPath $keyFile -PathType Leaf) { Copy-Item -LiteralPath $keyFile -Destination $copy -Force -ErrorAction Stop }
+        else { [IO.File]::WriteAllText($copy, '; codhq: no key file existed', [Text.Encoding]::ASCII) }
+    }
     Write-Ok "CD key backed up to $file"
     return $file
+}
+
+# Where a game keeps its key file (null when it keeps none, or the game is not found).
+function Get-CdKeyFilePath {
+    param([Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$GameId)
+    if (-not $Spec.PSObject.Properties['KeyFile'] -or -not $Spec.KeyFile) { return $null }
+    $found = Find-CatalogGame -Game (Get-CatalogGame -Id $GameId)
+    if (-not $found) { return $null }
+    return (Join-Path $found.Folder $Spec.KeyFile)
 }
 
 function Get-GameCdKeyBackupList {
@@ -3579,6 +4341,14 @@ function Set-GameCdKey {
     foreach ($name in $spec.ValueNames) {
         if ([string](Get-ItemProperty -LiteralPath $path -Name $name).$name -ne $normal) { throw "The CD key could not be confirmed after writing ($name)." }
     }
+    $keyFile = Get-CdKeyFilePath -Spec $spec -GameId $GameId
+    if ($keyFile) {
+        # The layout the game writes itself: the key, then its three comment lines.
+        $text = $normal + "`n// generated by CoD, do not modify`n// Do not give this file to ANYONE.`n// Infinity Ward and Activision will NOT ask you to send this file to them.`n"
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $keyFile) -Force
+        [IO.File]::WriteAllText($keyFile, $text, [Text.Encoding]::ASCII)
+        if (([IO.File]::ReadAllText($keyFile) -split "`n")[0].Trim() -ne $normal) { throw 'The CD key file could not be confirmed after writing.' }
+    }
     Write-Ok ("CD key saved: {0}" -f (Format-MaskedCdKey $normal))
 }
 
@@ -3593,6 +4363,12 @@ function Restore-GameCdKey {
     } else {
         $reg = Invoke-RegExe -Arguments @('import', $BackupFile)
         if ($reg.ExitCode -ne 0) { throw "Restoring the CD key failed: $($reg.Output)" }
+    }
+    $keyFile = Get-CdKeyFilePath -Spec $spec -GameId $GameId
+    $copy = [IO.Path]::ChangeExtension($BackupFile, '.codkey')
+    if ($keyFile -and (Test-Path -LiteralPath $copy -PathType Leaf)) {
+        if ([IO.File]::ReadAllText($copy) -match '^; codhq: no key file existed') { Remove-Item -LiteralPath $keyFile -Force -ErrorAction SilentlyContinue }
+        else { Copy-Item -LiteralPath $copy -Destination $keyFile -Force -ErrorAction Stop }
     }
     $status = Get-GameCdKeyStatus -GameId $GameId
     Write-Ok ("CD key restored: {0}" -f (($status.Values | ForEach-Object { "$($_.Name) $($_.Masked)" }) -join ', '))
@@ -6384,6 +7160,30 @@ $global:GameActionMap = @{
         if (-not (Test-CatalogGameFolder -Game $game -Folder $dialog.SelectedPath)) { throw "That folder does not contain $($game.Name): none of $($game.ValidFiles -join ', ') was found there." }
         if (Save-CatalogGameFolder -Id $game.Id -Folder $dialog.SelectedPath) { Write-Ok "$($game.Name) folder saved: $($dialog.SelectedPath)" } }
     'install' = { param($t) $null = Install-GameClient -GameId $t.Game -ClientId $t.Client }
+    'import' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $client = $game.Clients | Where-Object { $_.Id -eq $t.Client } | Select-Object -First 1
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = "Select the folder of your own copy of $($game.Name) that has the $($client.Name) (a retail install, a backup or the disc). Subfolders are searched too."
+        $dialog.ShowNewFolderButton = $false
+        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { Write-Info 'Import cancelled.'; return }
+        $null = Install-GameClient -GameId $t.Game -ClientId $t.Client -ImportFolder $dialog.SelectedPath }
+    'steamversion' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $found = Find-CatalogGame -Game $game
+        if (-not $found) { throw "$($game.Name) was not found." }
+        $installed = @($game.VersionClients | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_ })
+        if ($installed.Count -eq 0) { Write-Info "$($game.Name) is already on its Steam version."; return }
+        $names = ($installed | ForEach-Object { Get-CatalogClientName $_ }) -join ', '
+        if ((Read-Host "Remove $names from $($game.Name) and put the Steam files back? [y/N]") -notmatch '^(y|yes)$') { Stop-Cancelled 'Nothing was changed.' }
+        foreach ($id in $installed) { Remove-GameClient -GameId $game.Id -ClientId $id -GameFolder $found.Folder }
+        Write-Ok "$($game.Name) is on its Steam version." }
+    'repair' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $found = Find-CatalogGame -Game $game
+        if (-not $found) { throw "$($game.Name) was not found." }
+        foreach ($name in @($game.Repair)) {
+            $file = Join-Path $found.Folder $name
+            if (Test-Path -LiteralPath $file -PathType Leaf) { Remove-Item -LiteralPath $file -Force -ErrorAction Stop; Write-Ok "Deleted $name." } else { Write-Info "$name is not there; nothing to delete." }
+        }
+        Write-Info 'If the black screen stays, start the game once as administrator, or restart the PC (Shield''s FAQ).' }
     'update' = { param($t) $null = Update-GameClient -GameId $t.Game -ClientId $t.Client; $global:GameUpdateCounts.Remove($t.Game + '|' + $t.Client) }
     'remove' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $client = $game.Clients | Where-Object { $_.Id -eq $t.Client } | Select-Object -First 1
@@ -6444,11 +7244,13 @@ function Update-GamesPage {
         $block.Text = $Value; $block.FontSize = $Size; $block.TextWrapping = 'Wrap'; $block.FontWeight = $Weight
         $block.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, $Color)
         $block }
-    $button = { param([string]$Label, [hashtable]$Tag, [string]$Tip = '')
+    $button = { param([string]$Label, [hashtable]$Tag, [string]$Tip = '', [bool]$Enabled = $true)
         $b = New-Object System.Windows.Controls.Button
         $b.Content = $Label; $b.Tag = $Tag; $b.Margin = '0,8,8,0'
         if ($buttonStyle) { $b.Style = $buttonStyle }
         if ($Tip) { $b.ToolTip = $Tip }
+        $b.IsEnabled = $Enabled
+        if (-not $Enabled) { [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($b, $true) }
         $b.Add_Click({ param($sender, $e)
             $tag = $sender.Tag
             $action = $global:GameActionMap[[string]$tag.Action]
@@ -6484,7 +7286,9 @@ function Update-GamesPage {
             foreach ($client in $game.Clients) {
                 $isIn = Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id
                 $count = $global:GameUpdateCounts[$game.Id + '|' + $client.Id]
-                $status = if (-not $isIn) { 'not installed' } elseif ($null -eq $count) { 'installed' } elseif ($count -gt 0) { "installed, $count file(s) to update" } else { 'installed, up to date' }
+                $status = if ($client.Source -eq 'import') {
+                    if ($isIn) { 'imported from your copy' } else { "not imported ($(@($client.Assets).Count) files from your own copy: $((@($client.Assets) | ForEach-Object { ($_.Path -split '/')[-1] }) -join ', '))" }
+                } elseif (-not $isIn) { 'not installed' } elseif ($null -eq $count) { 'installed' } elseif ($count -gt 0) { 'installed, update available' } else { 'installed, up to date' }
                 $line = & $text ("{0}: {1}" -f $client.Name, $status) $(if ($isIn) { 'Green' } else { 'TextMuted' }) 12; $line.Margin = '0,3,0,0'; $null = $panel.Children.Add($line)
             }
         }
@@ -6499,14 +7303,24 @@ function Update-GamesPage {
         if ($found -and $game.Available) {
             foreach ($client in $game.Clients) {
                 if (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id) {
-                    $null = $buttons.Children.Add((& $button "Update $($client.Name)" @{ Action = 'update'; Game = $game.Id; Client = $client.Id }))
+                    if ($client.Source -ne 'import') { $null = $buttons.Children.Add((& $button "Update $($client.Name)" @{ Action = 'update'; Game = $game.Id; Client = $client.Id })) }
                     $null = $buttons.Children.Add((& $button "Remove $($client.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $client.Id }))
                 } else {
-                    $null = $buttons.Children.Add((& $button "Install $($client.Name)" @{ Action = 'install'; Game = $game.Id; Client = $client.Id }))
+                    $conflict = @($client.Conflicts | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_ }) | Select-Object -First 1
+                    $tip = if ($conflict) { "Remove $(Get-CatalogClientName $conflict) first: both replace the same files." } elseif ($client.Description) { $client.Description } else { '' }
+                    if ($client.Source -eq 'import') { $null = $buttons.Children.Add((& $button "Import $($client.Name)" @{ Action = 'import'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict))) }
+                    else { $null = $buttons.Children.Add((& $button "Install $($client.Name)" @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict))) }
                 }
             }
             if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
-            foreach ($mode in $game.Modes) { $null = $buttons.Children.Add((& $button "Play: $($mode.Label)" @{ Action = 'play'; Game = $game.Id; Mode = $mode.Id })) }
+            foreach ($mode in $game.Modes) {
+                $blocker = Get-ModeBlocker -Game $game -Mode $mode -GameFolder $found.Folder
+                $null = $buttons.Children.Add((& $button "Play: $($mode.Label)" @{ Action = 'play'; Game = $game.Id; Mode = $mode.Id } $blocker (-not $blocker)))
+            }
+            if (@($game.VersionClients | Where-Object { $_ -and (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_) }).Count -gt 0) {
+                $null = $buttons.Children.Add((& $button 'Use Steam version' @{ Action = 'steamversion'; Game = $game.Id } 'Remove the other versions and put the Steam files back exactly'))
+            }
+            if (@($game.Repair).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Repair' @{ Action = 'repair'; Game = $game.Id } ('Fixes a black screen at start: deletes ' + (@($game.Repair) -join ', ')))) }
         }
         if ($found -and $game.ExeCheck) { $null = $buttons.Children.Add((& $button 'Check game exe' @{ Action = 'exe'; Game = $game.Id } "Check your own $($game.ExeCheck.File)")) }
         if ($game.CdKey) { $null = $buttons.Children.Add((& $button 'CD key' @{ Action = 'cdkey'; Game = $game.Id } 'Your own CD key: view (masked), back up, set or restore')) }

@@ -1249,7 +1249,37 @@ Describe 'Game catalogue' {
     It 'pins a SHA-256 for every file it downloads outside CB manifests' {
         foreach ($client in @($catalog.Clients | Where-Object { $_.Source -ne 'cb' })) {
             @($client.Assets).Count | Should -BeGreaterThan 0 -Because $client.Id
-            foreach ($asset in $client.Assets) { $asset.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because "$($client.Id) $($asset.Path)" }
+            foreach ($asset in $client.Assets) {
+                if ($asset.PSObject.Properties['Crc32']) {
+                    # Imported from the player's own copy: never downloaded.
+                    $asset.Crc32 | Should -Match '^[0-9A-F]{8}$' -Because "$($client.Id) $($asset.Path)"
+                    $asset.Size | Should -BeGreaterThan 0 -Because "$($client.Id) $($asset.Path)"
+                    $client.Source | Should -Be 'import' -Because $client.Id
+                } elseif ($asset.PSObject.Properties['PatchFrom']) {
+                    # Made from the player's own executable.
+                    $asset.FromCrc32 | Should -Match '^[0-9A-F]{8}$' -Because "$($client.Id) $($asset.Path)"
+                    $asset.ImportFrom.Length | Should -Be $asset.ImportTo.Length -Because "$($client.Id) $($asset.Path)"
+                } else {
+                    $asset.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because "$($client.Id) $($asset.Path)"
+                    if ($asset.PSObject.Properties['Archive']) { $asset.Archive.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because "$($client.Id) $($asset.Path) archive" }
+                }
+            }
+        }
+    }
+
+    It 'never downloads Call of Duty or United Offensive game files, only imports them' {
+        foreach ($id in 'cod1-v11', 'cod1-v15', 'coduo-v151') {
+            $client = $catalog.Clients | Where-Object { $_.Id -eq $id }
+            $client.Source | Should -Be 'import'
+            foreach ($asset in $client.Assets) { $asset.PSObject.Properties['Url'] | Should -BeNullOrEmpty -Because "$id $($asset.Path)"; $asset.PSObject.Properties['Archive'] | Should -BeNullOrEmpty -Because "$id $($asset.Path)" }
+        }
+    }
+
+    It 'names every client a mode requires or excludes' {
+        $all = @($catalog.Clients | ForEach-Object { $_.Id })
+        foreach ($game in $catalog) {
+            foreach ($mode in $game.Modes) { foreach ($id in @($mode.Requires) + @($mode.Excludes)) { $all | Should -Contain $id -Because "$($game.Id) mode $($mode.Id)" } }
+            foreach ($client in $game.Clients) { foreach ($id in @($client.Conflicts)) { @($game.Clients.Id) | Should -Contain $id -Because "$($game.Id) $($client.Id)" } }
         }
     }
 
@@ -1526,7 +1556,7 @@ Describe 'Plutonium and launching games' {
         Mock Start-Process { }
         Mock Test-SandboxMode { $true }
         $cmd = Start-CatalogGame -GameId 'cod1' -ModeId 'mp' -GameFolder $folder
-        $cmd.Arguments | Should -Be '+set com_hunkmegs 512 +set r_lodbias -1000'
+        $cmd.Arguments | Should -Be '+set com_hunkmegs 512 +set r_lodbias -1000 +set cl_motd 0'
         Should -Invoke Start-Process -Times 0
     }
 }
@@ -1654,5 +1684,285 @@ Describe 'Game detection' {
         (Get-AppSettings).Theme | Should -Be 'light'
         Get-CatalogGameFolder -Id 'cod4' | Should -BeNullOrEmpty
         (Find-CatalogGame -Game $game).Source | Should -Be 'steam'
+    }
+}
+
+Describe 'Game versions: imported files, release archives, exe copies and launchers' {
+    BeforeAll {
+        $served = [hashtable]::Synchronized(@{})
+        $fileServer = Start-TestFileServer -Files $served
+        function Get-StringCrc32 {
+            param([string]$Text)
+            $file = Join-Path $TestDrive ('crc-' + [guid]::NewGuid().ToString('N'))
+            [IO.File]::WriteAllText($file, $Text, [Text.Encoding]::ASCII)
+            try { Get-FileCrc32 -Path $file } finally { Remove-Item -LiteralPath $file -Force }
+        }
+        function Get-FolderState {
+            param([string]$Folder)
+            @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Force | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($Folder.Length) + '=' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join "`n"
+        }
+        # A real Windows executable with exactly one import (mscoree.dll), for the
+        # exe-copy tests: any .NET Framework assembly has that. Built with the C#
+        # compiler that ships with Windows, which both PowerShell versions can run.
+        $script:peSource = Join-Path $TestDrive 'pe-sample.exe'
+        $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+        if (-not (Test-Path -LiteralPath $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
+        $csSource = Join-Path $TestDrive 'pe-sample.cs'
+        Set-Content -LiteralPath $csSource -Value 'public static class CodHqPeSample { public static void Main() { } }'
+        $null = & $csc /nologo /target:exe "/out:$script:peSource" $csSource
+        if (-not (Test-Path -LiteralPath $script:peSource)) { throw 'The sample executable could not be built.' }
+    }
+    AfterAll { Stop-TestHttpServer $fileServer }
+
+    BeforeEach {
+        $served.Clear()
+        $appData = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('appdata-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $gameFolder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('game-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $ownCopy = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('copy-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $gameFolder 'CoDMP.exe') -Value 'steam mp' -NoNewline
+        $null = New-Item -ItemType Directory -Path (Join-Path $gameFolder 'Main') -Force
+        Set-Content -LiteralPath (Join-Path $gameFolder 'Main\pak0.pk3') -Value 'steam pak0' -NoNewline
+        Set-Content -LiteralPath (Join-Path $gameFolder 'Main\pak1.pk3') -Value 'steam pak1' -NoNewline
+        $testRoot = 'HKCU:\Software\codhq-tests\' + [guid]::NewGuid().ToString('N') + '\'
+        $global:CdKeyRegistryRootOverride = $testRoot
+        Mock Get-ClientAppDataRoot { $appData }
+        Mock Write-Host { }
+        Mock Write-Progress { }
+        # The test game: CoD1's layout with clients whose files are the test's own.
+        $script:testGame = [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(); Detect = 'folder'; ValidFiles = @('CoDMP.exe')
+            NameArgument = '+set name'; DefaultArguments = '+set cl_motd 0'; NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
+            RegistryKey = 'Call of Duty'; VersionClients = @('fake-x', 'fake-v11'); Clients = @(); Modes = @(); Available = $true; UnavailableReason = '' }
+        Mock Get-CatalogGame { $script:testGame } -ParameterFilter { $Id -eq 'cod1' }
+    }
+    AfterEach {
+        Remove-Item -LiteralPath ($testRoot.TrimEnd('\')) -Recurse -Force -ErrorAction SilentlyContinue
+        $global:CdKeyRegistryRootOverride = $null
+    }
+
+    It 'imports only the files that match by size and CRC-32, and Remove puts the Steam files back exactly' {
+        $null = New-Item -ItemType Directory -Path (Join-Path $ownCopy 'Old Install\main') -Force
+        Set-Content -LiteralPath (Join-Path $ownCopy 'Old Install\main\pak0.pk3') -Value 'retail pak0 1.1' -NoNewline
+        Set-Content -LiteralPath (Join-Path $ownCopy 'Old Install\main\pak9.pk3') -Value 'something else' -NoNewline
+        Set-Content -LiteralPath (Join-Path $ownCopy 'Old Install\gamex86.dll') -Value 'retail game dll' -NoNewline
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-v11' -Name 'Test 1.1 files' -Source 'import' -RegistryVersion '1.1' -Assets @(
+            [pscustomobject]@{ Path = 'Main/pak0.pk3'; Size = 15; Crc32 = (Get-StringCrc32 'retail pak0 1.1') },
+            [pscustomobject]@{ Path = 'gamex86.dll'; Size = 15; Crc32 = (Get-StringCrc32 'retail game dll') }))
+        $before = Get-FolderState $gameFolder
+        $result = Install-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder -ImportFolder $ownCopy
+        $result.Imported | Should -Be 2
+        Get-Text (Join-Path $gameFolder 'Main\pak0.pk3') | Should -Be 'retail pak0 1.1'
+        Get-Text (Join-Path $gameFolder 'gamex86.dll') | Should -Be 'retail game dll'
+        Get-Text (Join-Path $gameFolder 'Main\pak1.pk3') | Should -Be 'steam pak1'
+        (Get-ItemProperty -LiteralPath ($testRoot + 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty')).Version | Should -Be '1.1'
+        Remove-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder
+        Get-FolderState $gameFolder | Should -Be $before
+        (Get-ItemProperty -LiteralPath ($testRoot + 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty') -ErrorAction SilentlyContinue).Version | Should -BeNullOrEmpty
+    }
+
+    It 'names every missing file with its size and CRC-32 and changes nothing' {
+        Set-Content -LiteralPath (Join-Path $ownCopy 'pak0.pk3') -Value 'a different build' -NoNewline
+        $crc = Get-StringCrc32 'retail pak0 1.1'
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-v11' -Name 'Test 1.1 files' -Source 'import' -Assets @([pscustomobject]@{ Path = 'Main/pak0.pk3'; Size = 15; Crc32 = $crc }))
+        $before = Get-FolderState $gameFolder
+        { Install-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder -ImportFolder $ownCopy } | Should -Throw "*Main/pak0.pk3 (15 bytes, CRC-32 $crc)*Nothing was changed*"
+        { Install-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder } | Should -Throw '*use Import*'
+        Get-FolderState $gameFolder | Should -Be $before
+    }
+
+    It 'takes files out of a release archive, each checked, and refuses an archive that does not match' {
+        $zip = Join-Path $TestDrive ('rel-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $zip -Entries ([ordered]@{ 'client.dll' = 'client dll'; 'CoDMP.exe' = 'patched exe'; 'readme.vbs' = 'not needed' })
+        $bytes = [IO.File]::ReadAllBytes($zip); $served['/rel/client.zip'] = $bytes
+        $archive = [pscustomobject]@{ Url = $fileServer.Base + 'rel/client.zip'; Size = $bytes.Length; Sha256 = (Get-BytesSha256 $bytes) }
+        $assets = @(
+            [pscustomobject]@{ Path = 'client.dll'; Entry = 'client.dll'; Size = 10; Sha256 = (Get-BytesSha256 ([Text.Encoding]::ASCII.GetBytes('client dll'))); Archive = $archive },
+            [pscustomobject]@{ Path = 'CoDMP.exe'; Entry = 'CoDMP.exe'; Size = 11; Sha256 = (Get-BytesSha256 ([Text.Encoding]::ASCII.GetBytes('patched exe'))); Archive = $archive })
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github' -Assets $assets)
+        $result = Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder -RetryDelaySeconds 0
+        $result.Downloaded | Should -Be 2
+        Get-Text (Join-Path $gameFolder 'client.dll') | Should -Be 'client dll'
+        Get-Text (Join-Path $gameFolder 'CoDMP.exe') | Should -Be 'patched exe'
+        Test-Path -LiteralPath (Join-Path $gameFolder 'readme.vbs') | Should -BeFalse
+        Remove-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder
+        Get-Text (Join-Path $gameFolder 'CoDMP.exe') | Should -Be 'steam mp'
+
+        $bad = @($assets | ForEach-Object { $c = $_.PSObject.Copy(); $c.Archive = [pscustomobject]@{ Url = $archive.Url; Size = $archive.Size; Sha256 = ('0' * 64) }; $c })
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github' -Assets $bad)
+        { Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder -RetryDelaySeconds 0 } | Should -Throw
+        Get-Text (Join-Path $gameFolder 'CoDMP.exe') | Should -Be 'steam mp'
+    }
+
+    It 'renames exactly one imported DLL in a copy of an executable and leaves the original alone' {
+        $copy = Join-Path $TestDrive ('patched-' + [guid]::NewGuid().ToString('N') + '.exe')
+        New-ImportRenamedExecutable -Source $script:peSource -Destination $copy -From 'mscoree.dll' -To 'mscorex.dll'
+        $a = [IO.File]::ReadAllBytes($script:peSource); $b = [IO.File]::ReadAllBytes($copy)
+        $b.Length | Should -Be $a.Length
+        @(0..($a.Length - 1) | Where-Object { $a[$_] -ne $b[$_] }).Count | Should -Be 1
+        [Text.Encoding]::ASCII.GetString($b).Contains('mscorex.dll') | Should -BeTrue
+        { New-ImportRenamedExecutable -Source $script:peSource -Destination $copy -From 'mss32.dll' -To 'cod1x.dll' } | Should -Throw '*0 time(s)*'
+        { New-ImportRenamedExecutable -Source $script:peSource -Destination $copy -From 'mscoree.dll' -To 'x.dll' } | Should -Throw '*same length*'
+    }
+
+    It 'makes the client exe copy only from the right version of the player''s exe' {
+        $peBytes = [IO.File]::ReadAllBytes($script:peSource)
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github' -Assets @(
+            [pscustomobject]@{ Path = 'CoDMPx.exe'; PatchFrom = 'CoDMP.exe'; FromSize = $peBytes.Length; FromCrc32 = (Get-FileCrc32 $script:peSource); ImportFrom = 'mscoree.dll'; ImportTo = 'mscorex.dll'; Needs = 'Test 1.1 files' }))
+        { Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder } | Should -Throw '*needs Test 1.1 files first*'
+        Test-Path -LiteralPath (Join-Path $gameFolder 'CoDMPx.exe') | Should -BeFalse
+        Copy-Item -LiteralPath $script:peSource -Destination (Join-Path $gameFolder 'CoDMP.exe') -Force
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder
+        [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $gameFolder 'CoDMPx.exe'))).Contains('mscorex.dll') | Should -BeTrue
+        (Get-FileHash (Join-Path $gameFolder 'CoDMP.exe')).Hash | Should -Be (Get-FileHash $script:peSource).Hash
+        (Get-ClientInstallPlan -Client $script:testGame.Clients[0] -GameFolder $gameFolder).Steps[0].Action | Should -Be 'current'
+    }
+
+    It 'starts a version only when what it needs is in place and what breaks it is not' {
+        $script:testGame.Clients = @((New-CatalogClient -Id 'fake-v11' -Name 'Test 1.1 files' -Source 'import'), (New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github'))
+        $mode11x = New-CatalogMode 'mp11x' 'Multiplayer 1.1x' -Exe 'CoDMP.exe' -Requires @('fake-v11', 'fake-x') -Elevate $true
+        $steam = New-CatalogMode 'mp' 'Multiplayer (Steam)' -Exe 'CoDMP.exe' -Excludes @('fake-v11', 'fake-x')
+        Get-ModeBlocker -Game $script:testGame -Mode $mode11x -GameFolder $gameFolder | Should -BeLike '*needs Test 1.1 files and Test X first*'
+        Get-ModeBlocker -Game $script:testGame -Mode $steam -GameFolder $gameFolder | Should -Be ''
+        Write-ClientRecord -GameFolder $gameFolder -ClientId 'fake-v11' -Record ([pscustomobject]@{ ClientId = 'fake-v11'; ClientName = 'Test 1.1 files'; Files = @() })
+        Write-ClientRecord -GameFolder $gameFolder -ClientId 'fake-x' -Record ([pscustomobject]@{ ClientId = 'fake-x'; ClientName = 'Test X'; Files = @() })
+        Get-ModeBlocker -Game $script:testGame -Mode $mode11x -GameFolder $gameFolder | Should -Be ''
+        Get-ModeBlocker -Game $script:testGame -Mode $steam -GameFolder $gameFolder | Should -BeLike '*Use Steam version*'
+        (Get-CatalogLaunchCommand -Game $script:testGame -Mode $mode11x -GameFolder $gameFolder -PlayerName 'Lark').Elevate | Should -BeTrue
+        (Get-CatalogLaunchCommand -Game $script:testGame -Mode (New-CatalogMode 'x' 'X' -Exe 'a.exe' -NoDefaultArguments $true) -GameFolder $gameFolder -PlayerName 'Lark').Arguments | Should -Be '+set name "Lark"'
+    }
+
+    It 'backs up the files a launcher replaces and removes what it added, keeping the rest' {
+        Set-Content -LiteralPath (Join-Path $gameFolder 'BlackOps4.exe') -Value 'battle.net exe' -NoNewline
+        $null = New-Item -ItemType Directory -Path (Join-Path $gameFolder 'LPC') -Force
+        Set-Content -LiteralPath (Join-Path $gameFolder 'LPC\core.ff') -Value 'battle.net lpc' -NoNewline
+        $served['/l/launcher.exe'] = [Text.Encoding]::ASCII.GetBytes('launcher')
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-x' -Name 'Test launcher' -Source 'github' -Protect @('BlackOps4.exe', 'LPC\*') -Watch @('project-bo4\*', 'LPC\*', 'XInput9_1_0.dll', 'BlackOps4.exe') -Assets @(
+            [pscustomobject]@{ Path = 'project-bo4/launcher/launcher.exe'; Url = $fileServer.Base + 'l/launcher.exe'; Size = 8; Sha256 = (Get-BytesSha256 ([Text.Encoding]::ASCII.GetBytes('launcher'))) }))
+        $before = Get-FolderState $gameFolder
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder -RetryDelaySeconds 0
+        # What the launcher itself does later: its exe, LPC and DLL over the player's.
+        Set-Content -LiteralPath (Join-Path $gameFolder 'BlackOps4.exe') -Value 'launcher exe' -NoNewline
+        Set-Content -LiteralPath (Join-Path $gameFolder 'LPC\core.ff') -Value 'launcher lpc' -NoNewline
+        Set-Content -LiteralPath (Join-Path $gameFolder 'LPC\extra.ff') -Value 'launcher lpc 2' -NoNewline
+        Set-Content -LiteralPath (Join-Path $gameFolder 'XInput9_1_0.dll') -Value 'client' -NoNewline
+        $null = New-Item -ItemType Directory -Path (Join-Path $gameFolder 'project-bo4\zone') -Force
+        Set-Content -LiteralPath (Join-Path $gameFolder 'project-bo4\zone\support.ff') -Value 'content' -NoNewline
+        Remove-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder
+        Get-FolderState $gameFolder | Should -Be $before
+        Test-Path -LiteralPath (Join-Path $gameFolder 'project-bo4') | Should -BeFalse
+    }
+
+    It 'asks before removing what a launcher added across the whole game folder' {
+        $served['/l/launcher.exe'] = [Text.Encoding]::ASCII.GetBytes('launcher')
+        $script:testGame.Clients = @(New-CatalogClient -Id 'fake-x' -Name 'Test launcher' -Source 'github' -AppData 'TestLauncher' -Watch @('*') -ConfirmCleanup $true -Assets @(
+            [pscustomobject]@{ Path = 'launcher.exe'; Url = $fileServer.Base + 'l/launcher.exe'; Size = 8; Sha256 = (Get-BytesSha256 ([Text.Encoding]::ASCII.GetBytes('launcher'))) }))
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder -RetryDelaySeconds 0
+        Test-Path -LiteralPath (Join-Path $appData 'TestLauncher\launcher.exe') | Should -BeTrue
+        Set-Content -LiteralPath (Join-Path $gameFolder 'hmw-mod.exe') -Value 'mod' -NoNewline
+        $null = New-Item -ItemType Directory -Path (Join-Path $gameFolder 'players2') -Force
+        Set-Content -LiteralPath (Join-Path $gameFolder 'players2\config.cfg') -Value 'settings' -NoNewline
+        Mock Read-Host { 'n' }
+        Remove-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder
+        Test-Path -LiteralPath (Join-Path $gameFolder 'hmw-mod.exe') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $appData 'TestLauncher\launcher.exe') | Should -BeFalse
+
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder -RetryDelaySeconds 0
+        Set-Content -LiteralPath (Join-Path $gameFolder 'hmw-mod2.exe') -Value 'mod' -NoNewline
+        Mock Read-Host { 'y' }
+        Remove-GameClient -GameId 'cod1' -ClientId 'fake-x' -GameFolder $gameFolder
+        Test-Path -LiteralPath (Join-Path $gameFolder 'hmw-mod2.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $gameFolder 'hmw-mod.exe') | Should -BeTrue
+        Get-Text (Join-Path $gameFolder 'players2\config.cfg') | Should -Be 'settings'
+    }
+
+    It 'refuses a client that conflicts with one already installed' {
+        $script:testGame.Clients = @((New-CatalogClient -Id 'fake-v11' -Name 'Test 1.1 files' -Source 'import' -Conflicts @('fake-x')), (New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github' -Conflicts @('fake-v11')))
+        Write-ClientRecord -GameFolder $gameFolder -ClientId 'fake-x' -Record ([pscustomobject]@{ ClientId = 'fake-x'; ClientName = 'Test X'; Files = @() })
+        { Install-GameClient -GameId 'cod1' -ClientId 'fake-v11' -GameFolder $gameFolder -ImportFolder $ownCopy } | Should -Throw '*cannot be installed together*'
+    }
+
+    It 'puts back version registry values without touching a CD key in the same key' {
+        $key = $testRoot + 'SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Activision\Call of Duty'
+        $null = New-Item -Path $key -Force
+        New-ItemProperty -LiteralPath $key -Name 'codkey' -Value 'ABCDEFGHJKLMNPQRST12' -PropertyType String | Out-Null
+        New-ItemProperty -LiteralPath $key -Name 'Version' -Value '1.5' -PropertyType String | Out-Null
+        $backup = Set-GameVersionRegistry -Game $script:testGame -GameFolder $gameFolder -Version '1.1'
+        $values = Get-ItemProperty -LiteralPath $key
+        $values.Version | Should -Be '1.1'
+        $values.InstallPath | Should -Be ($gameFolder + '\')
+        $values.Language | Should -Be '1'
+        Restore-GameVersionRegistry -Game $script:testGame -Backup $backup
+        $values = Get-ItemProperty -LiteralPath $key
+        $values.Version | Should -Be '1.5'
+        $values.codkey | Should -Be 'ABCDEFGHJKLMNPQRST12'
+        $values.PSObject.Properties['InstallPath'] | Should -BeNullOrEmpty
+    }
+
+    It 'writes values into a launcher settings file and keeps everything else in it' {
+        $file = Join-Path $gameFolder 'project-bo4.json'
+        Set-Content -LiteralPath $file -Value '{"identity":{"name":"Old","xuid":"123"},"dedicated":{"lobby":"public"}}'
+        Set-JsonSettingValues -Path $file -Values @{ 'identity.name' = 'Lark'; 'demonware.ipv4' = '127.0.0.1' } | Should -BeTrue
+        $data = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+        $data.identity.name | Should -Be 'Lark'
+        $data.identity.xuid | Should -Be '123'
+        $data.demonware.ipv4 | Should -Be '127.0.0.1'
+        $data.dedicated.lobby | Should -Be 'public'
+        Set-Content -LiteralPath $file -Value 'not json'
+        Mock Write-Warn { }
+        Set-JsonSettingValues -Path $file -Values @{ 'identity.name' = 'Lark' } | Should -BeFalse
+        Get-Text $file | Should -Be 'not json'
+    }
+
+    It 'reads the result Shield''s launcher writes' {
+        $check = ConvertFrom-ShieldSyncLog -Lines @('phase hashing total 61', 'manifest https://x/manifest.json', 'ok 1 ready 0 download 2217 launcher_update 0 error ', 'component game missing download 1')
+        $check.Ok | Should -BeTrue; $check.Ready | Should -BeFalse; $check.Download | Should -Be 2217; $check.LauncherUpdate | Should -BeFalse
+        $sync = ConvertFrom-ShieldSyncLog -Lines @('ok 1 ready 0 download 5 launcher_update 1 error ', 'sync failed disk full')
+        $sync.Synced | Should -BeFalse; $sync.Error | Should -Be 'disk full'; $sync.LauncherUpdate | Should -BeTrue
+        (ConvertFrom-ShieldSyncLog -Lines @('ok 1 ready 1 download 0 launcher_update 0 error ', 'sync ok ')).Synced | Should -BeTrue
+    }
+
+    It 'moves a GitHub client to its newest release with the digests GitHub publishes' {
+        $client = New-CatalogClient -Id 'fake-x' -Name 'Test X' -Source 'github' -ReleaseRepo 'owner/repo' -ReleaseTag 'v1' -Assets @(
+            [pscustomobject]@{ Path = 'a.exe'; Url = 'https://github.com/owner/repo/releases/download/v1/a.exe'; Size = 1; Sha256 = ('1' * 64) },
+            [pscustomobject]@{ Path = 'b.dll'; Entry = 'b.dll'; Size = 2; Sha256 = ('2' * 64); Archive = [pscustomobject]@{ Url = 'https://github.com/owner/repo/releases/download/v1/pack.zip'; Size = 3; Sha256 = ('3' * 64) } })
+        Mock Get-GitHubRelease { [pscustomobject]@{ Tag = 'v2'; Assets = @(
+            [pscustomobject]@{ Name = 'a.exe'; Size = 10; Url = 'https://github.com/owner/repo/releases/download/v2/a.exe'; Sha256 = ('a' * 64) },
+            [pscustomobject]@{ Name = 'pack.zip'; Size = 30; Url = 'https://github.com/owner/repo/releases/download/v2/pack.zip'; Sha256 = ('c' * 64) }) } }
+        $list = Get-ClientAssetList -Client $client -Latest
+        $list.Tag | Should -Be 'v2'
+        $list.Assets[0].Sha256 | Should -Be ('a' * 64)
+        $list.Assets[0].Url | Should -BeLike '*/v2/a.exe'
+        $list.Assets[1].Archive.Sha256 | Should -Be ('c' * 64)
+        (Get-ClientAssetList -Client $client).Assets[0].Sha256 | Should -Be ('1' * 64)
+        Mock Get-GitHubRelease { [pscustomobject]@{ Tag = 'v2'; Assets = @([pscustomobject]@{ Name = 'a.exe'; Size = 10; Url = 'u'; Sha256 = '' }) } }
+        { Get-ClientAssetList -Client $client -Latest } | Should -Throw '*no checked*'
+    }
+}
+
+Describe 'Call of Duty 1.1 CD key file' -Skip:([bool]$IsLinux -or [bool]$IsMacOS) {
+    BeforeEach {
+        $testRoot = 'HKCU:\Software\codhq-tests\' + [guid]::NewGuid().ToString('N') + '\'
+        $global:CdKeyRegistryRootOverride = $testRoot
+        $SettingsDirectory = Join-Path $TestDrive ('settings-' + [guid]::NewGuid().ToString('N'))
+        $script:cod1Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $folder = $script:cod1Folder
+        Mock Find-CatalogGame { [pscustomobject]@{ Folder = $script:cod1Folder; Source = 'saved' } }
+        Mock Write-Host { }
+    }
+    AfterEach {
+        Remove-Item -LiteralPath ($testRoot.TrimEnd('\')) -Recurse -Force -ErrorAction SilentlyContinue
+        $global:CdKeyRegistryRootOverride = $null
+    }
+
+    It 'writes main\codkey as the game does, alongside the registry value, and restores it' {
+        $null = New-Item -ItemType Directory -Path (Join-Path $folder 'Main') -Force
+        Set-Content -LiteralPath (Join-Path $folder 'Main\codkey') -Value 'OLDKEY' -NoNewline
+        Set-GameCdKey -GameId 'cod1' -Key 'ABCD-EFGH-JKLM-NPQR-ST12'
+        $lines = [IO.File]::ReadAllText((Join-Path $folder 'Main\codkey')) -split "`n"
+        $lines[0] | Should -Be 'ABCDEFGHJKLMNPQRST12'
+        $lines[1] | Should -Be '// generated by CoD, do not modify'
+        (Get-ItemProperty -LiteralPath ($testRoot + (Get-CdKeySpec -GameId 'cod1').Subkey)).codkey | Should -Be 'ABCDEFGHJKLMNPQRST12'
+        $backup = @(Get-GameCdKeyBackupList -GameId 'cod1')[0]
+        Restore-GameCdKey -GameId 'cod1' -BackupFile $backup.FullName
+        Get-Text (Join-Path $folder 'Main\codkey') | Should -Be 'OLDKEY'
     }
 }
