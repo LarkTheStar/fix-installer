@@ -148,6 +148,12 @@ backs it up, saves the key you type (from Steam: right-click the game > Manage >
 Keys) and restores a backup; keys never appear in the activity log. Plutonium games
 need a free Plutonium account: use **Plutonium login** once.
 
+**Call of Duty (2003).** Install 1.1 writes the singleplayer and multiplayer files from
+this project's own release into the game folder: the copy in your Steam library, or any
+folder you pick or create with **Change folder** (the card says **Folder picked** until
+Install has run). Play then starts `CoDSP.exe` or `CoDMP.exe`. Remove deletes the files it
+installed and puts back any game file it replaced.
+
 **Black Ops 4 (Project BO4).** Install puts Shield's official launcher in the game
 folder, as its guide says, after backing up your `BlackOps4.exe` and `LPC` files. It
 then runs that launcher without a window to download the client, the support mod and

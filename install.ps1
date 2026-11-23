@@ -2773,6 +2773,9 @@ function Get-GameCatalog {
                     Sha256 = '715bef06e94a98b5654fee62da81cd5f17ded051a88b84890e7df0db06c91652' }))
             Note = 'Install 1.1 copies the singleplayer and multiplayer files from this project''s release over your game folder; your own files are backed up and put back by Remove.'
             Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDSP.exe' -Clients @('cod1-v11')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDMP.exe' -Clients @('cod1-v11')))
+            # The 1.1 archive is the whole singleplayer and multiplayer file set, so a folder
+            # the player picks or creates is enough: Install writes the game files there.
+            AllowEmptyFolder = $true
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod4'; Name = 'Call of Duty 4: Modern Warfare'; Year = '2007'; SteamAppIds = @(7940); Detect = 'steam'
             ValidFiles = @('binkw32.dll', 'iw3mp.exe', 'iw3sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
@@ -2993,8 +2996,8 @@ function Find-BattleNetInstall {
 # the game's marker files.
 function Find-CatalogGame {
     param([Parameter(Mandatory)]$Game)
-    $saved = Get-CatalogGameFolder -Id $Game.Id
-    if ($saved -and (Test-CatalogGameFolder -Game $Game -Folder $saved)) { return [pscustomobject]@{ Folder = $saved; Source = 'saved' } }
+            $saved = Get-CatalogGameFolder -Id $Game.Id
+        if ($saved -and ((Test-CatalogGameFolder -Game $Game -Folder $saved) -or $Game.AllowEmptyFolder)) { return [pscustomobject]@{ Folder = $saved; Source = 'saved' } }
     foreach ($library in @(Get-SteamLibraries)) {
         foreach ($appId in $Game.SteamAppIds) {
             $manifest = Join-Path $library "steamapps\appmanifest_$appId.acf"
@@ -3460,8 +3463,15 @@ function Install-GameClient {
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
     if ($null -eq $client) { throw "$($game.Name) has no client '$ClientId'." }
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
-    if (-not $GameFolder -or -not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
+    if (-not $GameFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    if (-not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) {
+        # A game whose client ships the whole file set (Call of Duty 2003) can be put in a
+        # folder the player picked or created; every other game must already be there.
+        if (-not $game.AllowEmptyFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
+        if (-not (Test-Path -LiteralPath $GameFolder -PathType Container)) { $null = New-Item -ItemType Directory -Path $GameFolder -Force }
+        Write-Info "$GameFolder does not have $($game.Name) yet; $($client.Name) puts its files there."
+    }
     foreach ($other in @($client.Conflicts)) {
         if (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $other) {
             $otherName = ($game.Clients | Where-Object { $_.Id -eq $other } | Select-Object -First 1).Name
@@ -7103,10 +7113,12 @@ $global:GameActionMap = @{
         Write-Ok "Opened $url" }
     'folder' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dialog.Description = "Select the $($game.Name) folder"; $dialog.ShowNewFolderButton = $false
+        $dialog.Description = "Select the $($game.Name) folder"; $dialog.ShowNewFolderButton = [bool]$game.AllowEmptyFolder
         $found = Find-CatalogGame -Game $game; if ($found) { $dialog.SelectedPath = $found.Folder }
         if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { Write-Info 'Folder selection cancelled.'; return }
-        if (-not (Test-CatalogGameFolder -Game $game -Folder $dialog.SelectedPath)) { throw "That folder does not contain $($game.Name): none of $($game.ValidFiles -join ', ') was found there." }
+        $hasGame = Test-CatalogGameFolder -Game $game -Folder $dialog.SelectedPath
+        if (-not $hasGame -and -not $game.AllowEmptyFolder) { throw "That folder does not contain $($game.Name): none of $($game.ValidFiles -join ', ') was found there." }
+        if (-not $hasGame) { Write-Info "That folder does not have $($game.Name) yet; Install puts its files there." }
         if (Save-CatalogGameFolder -Id $game.Id -Folder $dialog.SelectedPath) { Write-Ok "$($game.Name) folder saved: $($dialog.SelectedPath)" } }
     'install' = { param($t) $null = Install-GameClient -GameId $t.Game -ClientId $t.Client }
     'repair' = { param($t) $game = Get-CatalogGame -Id $t.Game
@@ -7214,7 +7226,8 @@ function Update-GamesPage {
             $updates = @($game.Clients | Where-Object { [int]$global:GameUpdateCounts[$game.Id + '|' + $_.Id] -gt 0 })
             if ($updates.Count -gt 0) { $state = 'Update available'; $stateColor = 'Accent' }
             elseif ($installed.Count -gt 0) { $state = 'Client installed'; $stateColor = 'Green' }
-            elseif ($game.Available) { $state = 'Game found'; $stateColor = 'Green' }
+            elseif ($game.Available -and (Test-CatalogGameFolder -Game $game -Folder $found.Folder)) { $state = 'Game found'; $stateColor = 'Green' }
+            elseif ($game.Available) { $state = 'Folder picked'; $stateColor = 'Accent' }
         }
         $pill = & $text $state $stateColor 12 'SemiBold'
         [System.Windows.Controls.DockPanel]::SetDock($pill, 'Right'); $pill.VerticalAlignment = 'Center'

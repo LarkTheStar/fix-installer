@@ -1544,6 +1544,35 @@ Describe 'Call of Duty 1.1 archive client' {
         Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
     }
 
+    It 'installs into an empty folder the player picked, and the folder is detected afterwards' {
+        $empty = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-empty-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Test-CatalogGameFolder -Game (Get-CatalogGame -Id 'cod1') -Folder $empty | Should -BeFalse
+        $result = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $empty -RetryDelaySeconds 0
+        $result.Downloaded | Should -Be 3
+        Get-Text (Join-Path $empty 'CoDMP.exe') | Should -Be '1.1 mp'
+        Get-Text (Join-Path $empty 'CoDSP.exe') | Should -Be '1.1 sp'
+        Test-CatalogGameFolder -Game (Get-CatalogGame -Id 'cod1') -Folder $empty | Should -BeTrue
+        @((Read-ClientRecord -GameFolder $empty -ClientId 'cod1-v11').Backups).Count | Should -Be 0
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $empty
+        Test-Path -LiteralPath (Join-Path $empty 'CoDMP.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $empty -ClientId 'cod1-v11') | Should -BeFalse
+    }
+
+    It 'keeps a picked empty folder as the game folder until the files are in it' {
+        $empty = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod1-picked-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $game = Get-CatalogGame -Id 'cod1'
+        Save-CatalogGameFolder -Id 'cod1' -Folder $empty | Should -BeTrue
+        try {
+            $found = Find-CatalogGame -Game $game
+            $found | Should -Not -BeNullOrEmpty
+            $found.Folder | Should -Be $empty
+            $found.Source | Should -Be 'saved'
+        } finally { $null = Save-CatalogGameFolder -Id 'cod1' -Folder '' }
+        # Every other game still needs its own files before its folder is accepted.
+        $game.AllowEmptyFolder | Should -BeTrue
+        (Get-CatalogGame -Id 'cod4').AllowEmptyFolder | Should -BeNullOrEmpty
+    }
+
     It 'reports a different archive as an update' {
         $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
         $newer = (Get-CatalogGame -Id 'cod1').Clients[0].PSObject.Copy()

@@ -49,7 +49,7 @@ Order, from the least to the most involved:
 
 | Order | Game | Clients / versions | Game-specific checks |
 | --- | --- | --- | --- |
-| 1 | Call of Duty (2003) | 1.1 (singleplayer and MP) | Install copies the 1.1 files from this project's release over the folder; both Play modes start the 1.1 exes; Remove puts the previous game files back |
+| 1 | Call of Duty (2003) | 1.1 (singleplayer and MP) | Install copies the 1.1 files from this project's release over the folder; both Play modes start the 1.1 exes; Remove puts the previous game files back. Also test **Change folder** on an empty folder: the card says **Folder picked**, Install fills it, and the card then says **Game found** |
 | 2 | Call of Duty 4 | iw3x, CoD4x, IW3SP-Mod | install iw3x and CoD4x one at a time (they conflict); campaign via IW3SP-Mod |
 | 3 | Ghosts | IW6x | campaign and MP |
 | 4 | World at War, Black Ops, Black Ops II, MW3 | Plutonium | **Plutonium login** once; each mode's `plutonium://play/<id>` starts |
