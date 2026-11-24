@@ -1258,7 +1258,16 @@ Describe 'Game catalogue' {
 
     It 'pins a SHA-256 for every file it downloads outside CB manifests' {
         foreach ($client in @($catalog.Clients | Where-Object { $_.Source -ne 'cb' })) {
-            if ($client.Extract) { $client.Archive.Url | Should -Match '^https://'; $client.Archive.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because $client.Id; continue }
+            if ($client.Extract) {
+                $archives = @(@($client.Archives) | Where-Object { $null -ne $_ })
+                if ($archives.Count -eq 0) { $archives = @($client.Archive) }
+                $archives.Count | Should -BeGreaterThan 0 -Because $client.Id
+                foreach ($archive in $archives) {
+                    $archive.Url | Should -Match '^https://' -Because $client.Id
+                    $archive.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because $client.Id
+                }
+                continue
+            }
             @($client.Assets).Count | Should -BeGreaterThan 0 -Because $client.Id
             foreach ($asset in $client.Assets) {
                 $asset.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because "$($client.Id) $($asset.Path)"
@@ -1267,16 +1276,17 @@ Describe 'Game catalogue' {
         }
     }
 
-    It 'has cards for United Offensive and Call of Duty 2 with nothing to install yet' {
+    It 'has cards for United Offensive and Call of Duty 2' {
         foreach ($id in 'coduo', 'cod2') {
             $game = Get-CatalogGame -Id $id
             $game | Should -Not -BeNullOrEmpty -Because $id
             $game.Available | Should -BeTrue -Because $id
             @($game.ValidFiles | Where-Object { $_ -like '*.exe' }).Count | Should -Be 2 -Because $id
-            @($game.Clients).Count | Should -Be 0 -Because $id
-            @($game.Modes).Count | Should -Be 0 -Because $id
             $game.Note | Should -Not -BeNullOrEmpty -Because $id
         }
+        # Call of Duty 2 still has nothing to install.
+        @((Get-CatalogGame -Id 'cod2').Clients).Count | Should -Be 0
+        @((Get-CatalogGame -Id 'cod2').Modes).Count | Should -Be 0
         # United Offensive is not looked for in Steam at all: it goes where the player
         # picks. Call of Duty 2 is still found through Steam.
         @((Get-CatalogGame -Id 'coduo').SteamAppIds).Count | Should -Be 0
@@ -1855,6 +1865,87 @@ Describe 'United Offensive folder install' {
             $found.Folder | Should -Be $picked
             $found.Source | Should -Be 'saved'
         } finally { $null = Save-CatalogGameFolder -Id 'coduo' -Folder '' }
+    }
+
+    It 'is pinned to the 1.5 game and the United Offensive 1.5 archives, then the server key' {
+        $client = (Get-CatalogGame -Id 'coduo').Clients | Where-Object Id -eq 'uo-15'
+        $client | Should -Not -BeNullOrEmpty
+        $client.Extract | Should -BeTrue
+        $client.Source | Should -Be 'archive'
+        @($client.Archives | ForEach-Object { [IO.Path]::GetFileName(([uri]$_.Url).AbsolutePath) }) | Should -Be @('Call.of.Duty.1.5.zip', 'Call.of.Duty.-.UO.1.5.zip')
+        @($client.Archives | ForEach-Object { $_.Sha256 }) | Should -Be @('a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb', '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2')
+        $client.ServerKey.RegUrl | Should -Match '^https://de\.dvotx\.org/'
+        $client.ServerKey.KeyUrl | Should -Match '^https://de\.dvotx\.org/'
+        $client.ServerKey.Folder | Should -Be 'key'
+        $game = Get-CatalogGame -Id 'coduo'
+        $game.RequireEmptyFolder | Should -BeTrue
+        @($game.Modes | ForEach-Object { $_.Exe }) | Should -Be @('CoDUOSP.exe', 'CoDUOMP.exe')
+        @($game.Modes | ForEach-Object { $_.Label }) | Should -Be @('Singleplayer', 'Multiplayer')
+    }
+
+    It 'refuses a folder that is not empty before downloading anything' {
+        $busy = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-busy-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $busy 'notes.txt') -Value 'my stuff'
+        Mock Invoke-ResumableDownload { throw 'Nothing may be downloaded.' }
+        { Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $busy -RetryDelaySeconds 0 } | Should -Throw '*empty folder*'
+        Should -Invoke Invoke-ResumableDownload -Times 0 -Exactly
+        Get-Text (Join-Path $busy 'notes.txt') | Should -Be 'my stuff'
+    }
+
+    It 'copies the 1.5 game in, then United Offensive over it, and installs the server key' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $global:uoGame = Join-Path $TestDrive ('uo-game-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:uoGame -Entries ([ordered]@{ 'CoDUOSP.exe' = '1.5 sp'; 'CoDUOMP.exe' = '1.5 mp'; 'main/pak0.pk3' = '1.5 data'; 'main/pak1.pk3' = '1.5 extra' })
+        $global:uoUo = Join-Path $TestDrive ('uo-uo-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:uoUo -Entries ([ordered]@{ 'CoDUOSP.exe' = 'uo sp'; 'CoDUOMP.exe' = 'uo mp'; 'main/pak0.pk3' = 'uo data'; 'uo/uo1.pk3' = 'uo extra' })
+        $global:uoReg = Join-Path $TestDrive ('server-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $global:uoReg -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty]'
+            '"codkey"="PUT-THE-KEY-HERE"'
+            '"InstallPath"="C:\\Games\\Call of Duty"'
+            '"InstallDrive"="C:"')
+        $global:uoKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $global:uoKey -Value 'ABCD1234EFGH5678IJKL'
+        Mock Invoke-ResumableDownload {
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:uoReg -Destination $Destination -Force; return 0 }
+            if ($Url -like '*UO.1.5.zip') { Copy-Item -LiteralPath $global:uoUo -Destination $Destination -Force; return 0 }
+            Copy-Item -LiteralPath $global:uoGame -Destination $Destination -Force; return 0
+        }
+        Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = '' } }
+        $result = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
+        $result.KeyInstalled | Should -BeTrue
+        # The United Offensive archive is copied over the 1.5 game's own files.
+        Get-Text (Join-Path $folder 'CoDUOSP.exe') | Should -Be 'uo sp'
+        Get-Text (Join-Path $folder 'CoDUOMP.exe') | Should -Be 'uo mp'
+        Get-Text (Join-Path $folder 'main\pak0.pk3') | Should -Be 'uo data'
+        Get-Text (Join-Path $folder 'main\pak1.pk3') | Should -Be '1.5 extra'
+        Get-Text (Join-Path $folder 'uo\uo1.pk3') | Should -Be 'uo extra'
+        # The 1.5 game's own copy of a file the second archive replaced is not kept as if it
+        # were the player's.
+        $record = Read-ClientRecord -GameFolder $folder -ClientId 'uo-15'
+        @($record.Backups).Count | Should -Be 0
+        @($record.Files).Count | Should -Be 5
+        # The key is saved where the player can find it...
+        Test-Path -LiteralPath (Join-Path $folder 'key\codkey.txt') | Should -BeTrue
+        # ...and the registry file got the key, the path and the drive, quotes and all.
+        $reg = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-server-key.reg') -Raw
+        $reg | Should -Match '"codkey"="ABCD1234EFGH5678IJKL"'
+        $reg | Should -Match ('"InstallPath"="' + [regex]::Escape($folder.Replace('\', '\\')) + '"')
+        $reg | Should -Match ('"InstallDrive"="' + [regex]::Escape([IO.Path]::GetPathRoot($folder).TrimEnd('\')) + '"')
+        Should -Invoke Import-ServerKeyRegFile -Times 1 -Exactly
+        # Both executables are in place, so the card is ready.
+        Test-CatalogGameFolder -Game (Get-CatalogGame -Id 'coduo') -Folder $folder | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $folder 'CoDUOSP.exe') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $folder 'CoDUOMP.exe') | Should -BeTrue
+        # Remove takes the install and the key folder with it.
+        Remove-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder
+        Test-Path -LiteralPath (Join-Path $folder 'CoDUOSP.exe') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $folder 'uo') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $folder 'key') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $folder -ClientId 'uo-15') | Should -BeFalse
     }
 }
 

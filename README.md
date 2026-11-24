@@ -115,7 +115,7 @@ and installs the community client that brings it back online:
 | Clients | Games |
 | --- | --- |
 | 1.1 singleplayer and multiplayer files, then 1.1X on top of it (this project's release) | Call of Duty (2003) |
-| The United Offensive archive, into the folder you pick | United Offensive |
+| 1.5 game files, United Offensive 1.5 over them, and the server key (this project's release and the client's own site) | United Offensive |
 | Nothing yet: the card only finds the game | Call of Duty 2 |
 | Plutonium | World at War, Black Ops, Black Ops II (MP, Zombies), MW3 (MP) |
 | IW4x, AlterWare | MW2 (MP; campaign and Spec Ops), MW3 (campaign, Spec Ops) |
@@ -171,8 +171,16 @@ patch in place.
 
 **United Offensive** is not looked for in Steam, and it is never written into the Call of
 Duty (2003) folder, where its files would sit next to the 1.1 ones and clash with them.
-**Change folder** picks (or creates) the folder it goes in. Its archive is not pinned yet,
-so the card takes the folder and nothing else for now.
+**Change folder** picks (or creates) the folder it goes in, and that folder has to be
+empty: if it holds anything, Install says so and stops before downloading a byte. Install
+then copies the 1.5 game files in, copies the United Offensive 1.5 files over them, and
+finally sets up the server key these client servers ask for. The client's own site hands
+out a key and a `.reg` file that writes it into the registry, so Install saves the key in
+`key\` next to a copy of the `.reg`, fills in the key, the game's path and its drive, and
+imports it: `key\codkey.txt` and `key\codhq-server-key.reg` stay there for you, and if the
+import is refused, double-click that `.reg`. Play starts `CoDUOSP.exe` or `CoDUOMP.exe`,
+and **Remove** deletes what Install put there, `key\` included. Reinstalling goes through
+the same steps, so a folder it emptied again gets the key again.
 
 **Black Ops 4 (Project BO4).** Install puts Shield's official launcher in the game
 folder, as its guide says, after backing up your `BlackOps4.exe` and `LPC` files. It

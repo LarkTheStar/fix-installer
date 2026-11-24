@@ -65,12 +65,16 @@ leave the 1.1 files and nothing else behind (only the two executables are kept),
 stay greyed out until 1.1 is in, and Remove must take 1.1X with it and put every original
 file back. Removing 1.1 is the full revert.
 
-**United Offensive** takes any folder picked with **Change folder**, even an empty one:
-it is not looked for in Steam and it is never written into the Call of Duty (2003)
-folder, so the 1.1 files cannot clash with its own. Its archive is not pinned yet, so the
-card only takes the folder for now. **Call of Duty 2** only finds the game for now: there
-is no client to install yet, so checking the card says **Game found** with the right
-folder is all it can do. Add both to the table above once they have clients.
+**United Offensive** takes an empty folder picked with **Change folder**: it is not looked
+for in Steam, it is never written into the Call of Duty (2003) folder, and a folder that
+holds anything is refused before anything is downloaded. Install then copies the 1.5 game
+files in, the United Offensive 1.5 files over them, and sets up the server key from the
+client's site (`key\codkey.txt`, `key\codhq-server-key.reg`, imported). Check that the log
+says `The server key is installed for ...`, that Play starts `CoDUOSP.exe` and
+`CoDUOMP.exe`, and that Remove takes the files and `key\` away again. The key comes from
+the client's own site, so try the whole flow again if it fails to download. **Call of Duty
+2** only finds the game for now: there is no client to install yet, so checking the card
+says **Game found** with the right folder is all it can do.
 
 ## When something fails
 

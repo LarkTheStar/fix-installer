@@ -2712,14 +2712,22 @@ function New-CatalogClient {
         [string[]]$RequiredFiles = @(),
         # Everything in the game folder except KeepFiles is moved into the backup before
         # the archive is extracted, so it lands in a folder of its own files only.
-        [bool]$CleanInstall = $false, [string[]]$KeepFiles = @()
+        [bool]$CleanInstall = $false, [string[]]$KeepFiles = @(),
+        # Archives copied in one after the other, in this order (the 1.5 game, then the
+        # United Offensive 1.5 files). They are the game's own layout and are not opened
+        # to look for a wrapper folder.
+        [object[]]$Archives = @(),
+        # The key the client's own servers ask for: the .reg file its site publishes and
+        # the page that hands the key out. Install fills the key and the game's path into
+        # the .reg and imports it.
+        $ServerKey = $null
     )
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
         Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
-        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles) }
+        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ServerKey = $ServerKey }
 }
 
 function New-CatalogMode {
@@ -2806,9 +2814,18 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(); Detect = 'none'
             ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
             NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @(); Modes = @()
-            Note = 'Pick the folder to put United Offensive in with Change folder: it is not looked for in Steam, and it is not installed over Call of Duty (2003).'
-            AllowEmptyFolder = $true
+            # The 1.5 game files, then the United Offensive 1.5 files over them, then the
+            # server key: the client servers of this build ask for one, and its own site
+            # hands it out together with a .reg file that writes it into the registry.
+            Clients = @((New-CatalogClient -Id 'uo-15' -Name '1.5 (game and United Offensive)' -Source 'archive' -Extract $true -RequiredFiles @('CoDUOSP.exe', 'CoDUOMP.exe') -Description 'Downloads the 1.5 game and the United Offensive 1.5 files, copies them into the empty folder you picked, then gets the server key from the client''s site and installs it.' -Archives @(
+                    @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.5.zip'; Size = 1236721212; Sha256 = 'a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb' },
+                    @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 973056769; Sha256 = '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2' }) -ServerKey @{
+                    RegUrl = 'https://de.dvotx.org/dump/cod1/cod1.1_%28x64%29.reg'
+                    KeyUrl = 'https://de.dvotx.org/dump/cod1/downloads.php?get=codkey'
+                    Folder = 'key' }))
+            Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDUOSP.exe' -Clients @('uo-15')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDUOMP.exe' -Clients @('uo-15')))
+            Note = 'Pick an empty folder with Change folder: Install copies the 1.5 game and the United Offensive 1.5 files into it, then puts the server key the client''s site hands out in key\ and installs it. It is not looked for in Steam, and it is not installed over Call of Duty (2003).'
+            AllowEmptyFolder = $true; RequireEmptyFolder = $true
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
             ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
@@ -3495,54 +3512,194 @@ function Move-GameFolderAside {
     return $moved
 }
 
+# The folder a client's server key is saved in (key\ unless the client says otherwise).
+function Get-ServerKeyFolder {
+    param($Spec, [Parameter(Mandatory)][string]$GameFolder)
+    $name = if ($Spec -and -not [string]::IsNullOrWhiteSpace([string]$Spec.Folder)) { [string]$Spec.Folder } else { 'key' }
+    return (Join-Path $GameFolder $name)
+}
+
+# The key a client's site hands out. It is read for one reason only, to copy it into the
+# registry file: a codkey line if the file has one, otherwise a line that is the key and
+# nothing else, otherwise the longest run of letters and digits in the file.
+function Read-ServerKey {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $text = [IO.File]::ReadAllText($Path)
+    if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+    foreach ($pattern in @('(?i)cod[ _-]?key["'']?\s*[:=]\s*["'']?([A-Za-z0-9][A-Za-z0-9_-]{7,63})', '(?im)^[ \t]*([A-Za-z0-9][A-Za-z0-9_-]{7,63})[ \t]*$')) {
+        $match = [regex]::Match($text, $pattern)
+        if ($match.Success) { return $match.Groups[1].Value }
+    }
+    $longest = ''
+    foreach ($match in [regex]::Matches($text, '[A-Za-z0-9][A-Za-z0-9_-]{11,63}')) {
+        if ($match.Value.Length -gt $longest.Length) { $longest = $match.Value }
+    }
+    return $longest
+}
+
+# Gives one "name"="value" line of a .reg file a new value, keeping its indentation, its
+# quotes and the spacing around the '=' exactly as they were.
+function Set-RegLineValue {
+    param([string]$Text, [Parameter(Mandatory)][string]$Name, [string]$Value = '')
+    $pattern = '(?im)^([ \t]*"' + [regex]::Escape($Name) + '"[ \t]*=[ \t]*)("[^"\r\n]*")'
+    $replacement = '$1"' + $Value.Replace('$', '$$') + '"'
+    return [regex]::Replace($Text, $pattern, $replacement)
+}
+
+# Writes the key, the game's path and its drive into the .reg file's own lines, and leaves
+# the encoding (ANSI, UTF-16 with or without a BOM, UTF-8) as it was.
+function Set-ServerKeyRegFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$GameFolder)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $encoding = [Text.Encoding]::GetEncoding(1252)
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { $encoding = New-Object System.Text.UnicodeEncoding($false, $true) }
+    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) { $encoding = New-Object System.Text.UnicodeEncoding($true, $true) }
+    elseif ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $encoding = New-Object System.Text.UTF8Encoding($true) }
+    $text = $encoding.GetString($bytes)
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
+    # A .reg string writes one backslash as two, so the path is doubled.
+    $pathValue = $GameFolder.Replace('\', '\\')
+    $drive = [IO.Path]::GetPathRoot($GameFolder)
+    if ($drive) { $drive = $drive.TrimEnd('\') } else { $drive = '' }
+    $text = Set-RegLineValue -Text $text -Name 'codkey' -Value $Key
+    $text = Set-RegLineValue -Text $text -Name 'InstallPath' -Value $pathValue
+    $text = Set-RegLineValue -Text $text -Name 'InstallDrive' -Value $drive
+    if ($text -notmatch '(?im)^[ \t]*"codkey"[ \t]*=') { throw "The downloaded registry file has no codkey line to put the server key in. It was left as it came." }
+    [IO.File]::WriteAllText($Path, $text, $encoding)
+    return $true
+}
+
+# Importing a .reg file, in a function of its own so the tests can run the whole key setup
+# without writing anything into the registry of the machine running them.
+function Import-ServerKeyRegFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    if (-not (Test-Path -LiteralPath $regExe -PathType Leaf)) { return [pscustomobject]@{ ExitCode = 1; Output = "$regExe was not found." } }
+    $output = & $regExe import $Path 2>&1
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($output | Out-String).Trim()) }
+}
+
+# The key the United Offensive client servers ask for: their site hands out a key and a
+# .reg file that writes it into the registry with the game's path next to it, and doing
+# that by hand is a puzzle. Install does the round trip: the .reg is downloaded exactly as
+# it is published, the key is saved for the player in key\, the codkey, InstallPath and
+# InstallDrive lines get the real values, and the file is imported. Neither download is
+# listed, opened or shown anywhere.
+function Install-ServerKeyReg {
+    param([Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
+    if ([string]::IsNullOrWhiteSpace([string]$Spec.RegUrl) -or [string]::IsNullOrWhiteSpace([string]$Spec.KeyUrl)) { throw 'The server key has no registry file or key page to download from.' }
+    $keyDir = Get-ServerKeyFolder -Spec $Spec -GameFolder $GameFolder
+    $null = New-Item -ItemType Directory -Path $keyDir -Force
+    $stage = Join-Path $env:TEMP ('codhq-serverkey-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $stage -Force
+    try {
+        $regName = [uri]::UnescapeDataString([IO.Path]::GetFileName(([uri]([string]$Spec.RegUrl)).AbsolutePath))
+        if ([string]::IsNullOrWhiteSpace($regName)) { $regName = 'serverkey.reg' }
+        if (-not $regName.EndsWith('.reg')) { $regName += '.reg' }
+        $regPath = Join-Path $stage $regName
+        Write-Info "Downloading the server key registry file: $regName"
+        $null = Invoke-ResumableDownload -Url ([string]$Spec.RegUrl) -Destination $regPath -Label 'Downloading the server key registry file' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
+        $keyPath = Join-Path $keyDir 'codkey.txt'
+        Write-Info "Downloading the server key into $keyDir ..."
+        $null = Invoke-ResumableDownload -Url ([string]$Spec.KeyUrl) -Destination $keyPath -Label 'Downloading the server key' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
+        $key = Read-ServerKey -Path $keyPath
+        if (-not $key) { throw "The file the site hands out for the key ($keyPath) does not hold a key that can be read. It was kept there; open it and put the key into $regName by hand." }
+        Write-Ok "The server key is saved in $keyPath."
+        $null = Set-ServerKeyRegFile -Path $regPath -Key $key -GameFolder $GameFolder
+        $copy = Join-Path $keyDir 'codhq-server-key.reg'
+        Copy-Item -LiteralPath $regPath -Destination $copy -Force
+        Write-Info "Writing the key, the path and the drive into the registry: $regName"
+        $imported = Import-ServerKeyRegFile -Path $regPath
+        if ($imported.ExitCode -ne 0) {
+            Write-Warn ("The registry file could not be imported ({0}). Double-click {1} to do it yourself: everything else is installed." -f $imported.Output, $copy)
+            return $false
+        }
+        Write-Ok "The server key is installed for $GameFolder. It and the registry file are also in $keyDir."
+        return $true
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Install-GameClientArchive {
     param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
-    $archive = $Client.Archive
-    if ($null -eq $archive -or [string]::IsNullOrWhiteSpace([string]$archive.Url) -or [string]::IsNullOrWhiteSpace([string]$archive.Sha256)) { throw "$($Client.Name) has no archive to install." }
+    $archives = @(@($Client.Archives) | Where-Object { $null -ne $_ })
+    if ($archives.Count -eq 0 -and $null -ne $Client.Archive) { $archives = @($Client.Archive) }
+    foreach ($item in $archives) {
+        if ([string]::IsNullOrWhiteSpace([string]$item.Url)) { throw "$($Client.Name) has no archive to install." }
+        if ([string]::IsNullOrWhiteSpace([string]$item.Sha256)) { throw "$($Client.Name): $(([string]$item.Url -split '/')[-1]) is not pinned by SHA-256, so nothing is downloaded from it." }
+    }
+    $primary = $archives[0]
+    # One hash for the whole set of archives this client installs, so an up-to-date install
+    # is recognised without opening anything.
+    $archiveKey = (@($archives | ForEach-Object { ([string]$_.Sha256).ToLowerInvariant() }) -join '+')
     $previous = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
     $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $Client.Id
-    # The same archive, and every file it wrote is still there: nothing to do.
-    if ($previous -and [string]$previous.ArchiveSha256 -eq [string]$archive.Sha256) {
+    # The same archives, and every file they wrote is still there: nothing to do.
+    if ($previous -and [string]$previous.ArchiveSha256 -eq $archiveKey) {
         $missing = @($previous.Files | Where-Object { -not (Test-Path -LiteralPath ([string]$_.Target) -PathType Leaf) })
         if ($missing.Count -eq 0) {
             Write-Ok "$($Client.Name) is already installed and up to date."
-            return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = 0; Current = @($previous.Files).Count; Derived = 0; Kept = 0; Skipped = 0 }
+            $keyApplied = $false
+            # The server key is part of the install: Install fetches it again if its folder is gone.
+            if ($Client.ServerKey -and -not (Test-Path -LiteralPath (Get-ServerKeyFolder -Spec $Client.ServerKey -GameFolder $GameFolder) -PathType Container)) {
+                try { $keyApplied = [bool](Install-ServerKeyReg -Spec $Client.ServerKey -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds) }
+                catch { Write-Warn "The server key was not installed; the game files are: $($_.Exception.Message)" }
+            }
+            return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = 0; Current = @($previous.Files).Count; Derived = 0; Kept = 0; Skipped = 0; KeyInstalled = $keyApplied }
         }
     }
     $stage = Join-Path $env:TEMP ('codhq-archive-' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $stage -Force
-    $zipPath = Join-Path $stage (([string]$archive.Url -split '/')[-1])
     $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $Client.Id
     # One folder per run, so a backup this client already holds is never written over.
     $runBackup = Join-Path $backupRoot ('run-' + [guid]::NewGuid().ToString('N'))
     $journal = [System.Collections.Generic.List[object]]::new()
     try {
-        Write-Info "Downloading $($Client.Name): $(([string]$archive.Url -split '/')[-1])"
-        $null = Invoke-ResumableDownload -Url ([string]$archive.Url) -Destination $zipPath -Label "Downloading $($Client.Name)" -ExpectedSha256 ([string]$archive.Sha256) -RetryDelaySeconds $RetryDelaySeconds
-        # Only now that the archive is on disk and its SHA-256 is verified: a clean install
-        # empties the folder, so a client that sits on top of this one (1.1X on 1.1) has to
-        # go before that. Removing it earlier would leave the player without the patch if a
-        # 1.2 GB download then failed.
-        if ($Client.CleanInstall) {
-            foreach ($dependent in @(Get-InstalledDependentClients -Game $Game -ClientId $Client.Id -GameFolder $GameFolder)) {
-                Write-Info "Removing $($dependent.Name) first: $($Client.Name) is installed as a clean copy. Install it again afterwards."
-                Remove-GameClient -GameId $Game.Id -ClientId $dependent.Id -GameFolder $GameFolder
+        $first = $true
+        $root = ''
+        $index = 0
+        foreach ($item in $archives) {
+            $index++
+            $zipPath = Join-Path $stage (([string]$item.Url -split '/')[-1])
+            $label = if ($archives.Count -gt 1) { "$($Client.Name) ($index of $($archives.Count))" } else { $Client.Name }
+            Write-Info "Downloading $label`: $(([string]$item.Url -split '/')[-1])"
+            $null = Invoke-ResumableDownload -Url ([string]$item.Url) -Destination $zipPath -Label "Downloading $label" -ExpectedSha256 ([string]$item.Sha256) -RetryDelaySeconds $RetryDelaySeconds
+            if ($first) {
+                # Only now that the archive is on disk and its SHA-256 is verified: a clean
+                # install empties the folder, so a client that sits on top of this one (1.1X
+                # on 1.1) has to go before that. Removing it earlier would leave the player
+                # without the patch if the download then failed.
+                if ($Client.CleanInstall) {
+                    foreach ($dependent in @(Get-InstalledDependentClients -Game $Game -ClientId $Client.Id -GameFolder $GameFolder)) {
+                        Write-Info "Removing $($dependent.Name) first: $($Client.Name) is installed as a clean copy. Install it again afterwards."
+                        Remove-GameClient -GameId $Game.Id -ClientId $dependent.Id -GameFolder $GameFolder
+                    }
+                    # That removal deleted a record, so what the folder holds is no longer
+                    # what was read at the start.
+                    $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $Client.Id
+                }
+                if ($archives.Count -eq 1) {
+                    $root = Get-GameArchiveRoot -ZipPath $zipPath
+                    if ($root) { Write-Info "The archive keeps its files in '$root\'; they are copied in without it." }
+                }
+                # Several archives are the game's own layout, published in order: they are
+                # copied in as they are, without looking inside them for a wrapper folder.
+                if ($Client.CleanInstall) {
+                    $previousTargets = @{}
+                    if ($previous) { foreach ($f in @($previous.Files)) { $previousTargets[([string]$f.Target).ToLowerInvariant()] = $true } }
+                    Write-Info "Moving everything in $GameFolder except $(@($Client.KeepFiles) -join ' and ') into the backup ..."
+                    $aside = Move-GameFolderAside -GameFolder $GameFolder -BackupDirectory $runBackup -Keep @($Client.KeepFiles) -SkipTargets $previousTargets -Journal $journal
+                    Write-Info "Files moved aside: $aside. They are all in the backup, and Remove puts them back as they were."
+                }
+                $first = $false
             }
-            # That removal deleted a record, so what the folder holds is no longer what was
-            # read at the start.
-            $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $Client.Id
+            Write-Info "Copying $label into $GameFolder ..."
+            Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $runBackup -StripPrefix $root
+            # The next archive of the same client only needs the download stage free.
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
         }
-        $root = Get-GameArchiveRoot -ZipPath $zipPath
-        if ($root) { Write-Info "The archive keeps its files in '$root\'; they are copied in without it." }
-        if ($Client.CleanInstall) {
-            $previousTargets = @{}
-            if ($previous) { foreach ($f in @($previous.Files)) { $previousTargets[([string]$f.Target).ToLowerInvariant()] = $true } }
-            Write-Info "Moving everything in $GameFolder except $(@($Client.KeepFiles) -join ' and ') into the backup ..."
-            $aside = Move-GameFolderAside -GameFolder $GameFolder -BackupDirectory $runBackup -Keep @($Client.KeepFiles) -SkipTargets $previousTargets -Journal $journal
-            Write-Info "Files moved aside: $aside. They are all in the backup, and Remove puts them back as they were."
-        }
-        Write-Info "Copying $($Client.Name) into $GameFolder ..."
-        Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $runBackup -StripPrefix $root
     } catch {
         Write-Warn "Installing $($Client.Name) failed; putting back what was changed..."
         $undone = Undo-ZipExtraction -Journal $journal
@@ -3560,6 +3717,10 @@ function Install-GameClientArchive {
     $files = [System.Collections.Generic.List[object]]::new()
     $createdDirs = [System.Collections.Generic.List[string]]::new()
     if ($previous) { foreach ($d in @($previous.CreatedDirs)) { $createdDirs.Add([string]$d) } }
+    # One entry per file: a second archive of the same client writes over files the first
+    # one placed, so the last entry for a path is the one the record keeps.
+    $byTarget = [ordered]@{}
+    $runCreated = @{}
     foreach ($change in $journal) {
         if ($change.Kind -eq 'Directory') { $createdDirs.Add([string]$change.Path); continue }
         if ($change.Kind -eq 'Wiped') { $backups.Add([pscustomobject]@{ Target = [string]$change.Path; Backup = [string]$change.Backup }); continue }
@@ -3567,11 +3728,15 @@ function Install-GameClientArchive {
         if ($change.Kind -eq 'Replaced') {
             # What Expand-ZipOverwrite moved aside is the file the previous install wrote;
             # the player's own original is already in this client's record. Keep that one.
-            # A file this client wrote last time is not the player's: no backup is kept for it.
+            # A file this client wrote itself (last time, or by an archive earlier in this
+            # run) is not the player's: no backup is kept for it.
             $earlier = @($backups | Where-Object { $_.Target -ieq $full }) | Select-Object -First 1
-            if ($earlier -or $previousFiles.ContainsKey($full.ToLowerInvariant())) { Remove-Item -LiteralPath ([string]$change.Backup) -Force -ErrorAction SilentlyContinue }
+            if ($earlier -or $previousFiles.ContainsKey($full.ToLowerInvariant()) -or $runCreated.ContainsKey($full.ToLowerInvariant())) { Remove-Item -LiteralPath ([string]$change.Backup) -Force -ErrorAction SilentlyContinue }
             else { $backups.Add([pscustomobject]@{ Target = $full; Backup = [string]$change.Backup }) }
-        }
+        } else { $runCreated[$full.ToLowerInvariant()] = $true }
+        $byTarget[$full.ToLowerInvariant()] = $full
+    }
+    foreach ($full in @($byTarget.Values)) {
         $files.Add([pscustomobject]@{ Path = $full.Substring($GameFolder.Length + 1); Dest = 'game'; Target = $full
             Size = (Get-Item -LiteralPath $full).Length; Sha1 = (Get-FileSha1Hex $full); Sha256 = (Get-FileSha256 -Path $full); Derived = $false; Kind = 'archive' })
     }
@@ -3614,14 +3779,21 @@ function Install-GameClientArchive {
 
     Write-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id -Record ([pscustomobject]@{
         Version = 1; GameId = $Game.Id; ClientId = $Client.Id; ClientName = $Client.Name; Source = 'archive'; Manifest = ''
-        ManifestHash = ''; ReleaseTag = ''; ArchiveUrl = [string]$archive.Url; ArchiveSha256 = [string]$archive.Sha256
+        ManifestHash = ''; ReleaseTag = ''; ArchiveUrl = [string]$primary.Url; ArchiveSha256 = $archiveKey
         InstalledAt = [DateTime]::UtcNow.ToString('o'); GameFolder = $GameFolder
         Files = @($files.ToArray()); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs | Select-Object -Unique); ExpectedGameFiles = @()
         Snapshot = @() })
     if ((Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
+    # The server key last: a failure there leaves the game files installed, and the key the
+    # site handed out is already in key\ for the player.
+    $keyApplied = $false
+    if ($Client.ServerKey) {
+        try { $keyApplied = [bool](Install-ServerKeyReg -Spec $Client.ServerKey -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds) }
+        catch { Write-Warn "The server key was not installed; the game files are: $($_.Exception.Message)" }
+    }
     Write-Ok "$($Client.Name) is installed for $($Game.Name)."
     Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Files copied from the archive: {0}. Your own game files kept: {1}.', $files.Count, $backups.Count))
-    return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = $files.Count; Current = 0; Derived = 0; Kept = $backups.Count; Skipped = 0 }
+    return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = $files.Count; Current = 0; Derived = 0; Kept = $backups.Count; Skipped = 0; KeyInstalled = $keyApplied }
 }
 
 function Install-GameClient {
@@ -3637,6 +3809,17 @@ function Install-GameClient {
         throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder."
     }
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    # United Offensive is unpacked into a folder of its own: anything already in it would
+    # end up next to the game files, so the install waits for an empty folder instead of
+    # writing into it. A folder this installer already put the game into is not empty any
+    # more, so its own records decide.
+    if ($game.RequireEmptyFolder -and (Test-Path -LiteralPath $GameFolder -PathType Container)) {
+        $records = @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -Force -ErrorAction SilentlyContinue)
+        if ($records.Count -eq 0) {
+            $items = @(Get-ChildItem -LiteralPath $GameFolder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '.codhq-*' })
+            if ($items.Count -gt 0) { throw "$($game.Name) is installed into an empty folder: $GameFolder already has $($items.Count) item(s) in it, so nothing was downloaded or changed. Pick an empty folder with Change folder." }
+        }
+    }
     if (-not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) {
         # A game whose client ships the whole file set (Call of Duty 2003) can be put in a
         # folder the player picked or created; every other game must already be there.
@@ -3869,6 +4052,14 @@ function Remove-GameClient {
     # A launcher-type client's launcher added files of its own: everything new since
     # the install under its watched paths goes (after asking, for whole-game watches).
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
+    # The server key folder is part of what Install set up, so Remove takes it too.
+    if ($client -and $client.ServerKey) {
+        $keyDir = Get-ServerKeyFolder -Spec $client.ServerKey -GameFolder $GameFolder
+        if (Test-Path -LiteralPath $keyDir -PathType Container) {
+            Remove-Item -LiteralPath $keyDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Info "Removed the server key folder: $keyDir"
+        }
+    }
     if ($client -and @($client.Watch).Count -gt 0 -and $null -ne $record.Snapshot) {
         $before = @{}
         foreach ($path in @($record.Snapshot)) { $before[([string]$path).ToLowerInvariant()] = $true }
@@ -7316,6 +7507,12 @@ $global:GameActionMap = @{
         if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { Write-Info 'Folder selection cancelled.'; return }
         $hasGame = Test-CatalogGameFolder -Game $game -Folder $dialog.SelectedPath
         if (-not $hasGame -and -not $game.AllowEmptyFolder) { throw "That folder does not contain $($game.Name): none of $($game.ValidFiles -join ', ') was found there." }
+        # A game that is unpacked into a folder of its own (United Offensive) waits for an
+        # empty one: anything already there would end up next to the game files.
+        if (-not $hasGame -and $game.RequireEmptyFolder) {
+            $items = @(Get-ChildItem -LiteralPath $dialog.SelectedPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '.codhq-*' })
+            if ($items.Count -gt 0) { throw "That folder already has $($items.Count) item(s) in it. $($game.Name) is installed into an empty folder: pick an empty one. Nothing was downloaded." }
+        }
         if (-not $hasGame) { Write-Info "That folder does not have $($game.Name) yet; Install puts its files there." }
         if (Save-CatalogGameFolder -Id $game.Id -Folder $dialog.SelectedPath) { Write-Ok "$($game.Name) folder saved: $($dialog.SelectedPath)" } }
     'install' = { param($t) $null = Install-GameClient -GameId $t.Game -ClientId $t.Client }
