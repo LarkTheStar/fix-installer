@@ -114,8 +114,9 @@ and installs the community client that brings it back online:
 
 | Clients | Games |
 | --- | --- |
-| 1.1 singleplayer and multiplayer files (this project's release) | Call of Duty (2003) |
-| Nothing yet: the cards only find United Offensive and Call of Duty 2 | United Offensive, Call of Duty 2 |
+| 1.1 singleplayer and multiplayer files, then 1.1X on top of it (this project's release) | Call of Duty (2003) |
+| The United Offensive archive, into the folder you pick | United Offensive |
+| Nothing yet: the card only finds the game | Call of Duty 2 |
 | Plutonium | World at War, Black Ops, Black Ops II (MP, Zombies), MW3 (MP) |
 | IW4x, AlterWare | MW2 (MP; campaign and Spec Ops), MW3 (campaign, Spec Ops) |
 | iw3x or CoD4x, IW3SP-Mod | CoD4 (MP; campaign) |
@@ -155,6 +156,16 @@ this project's own release into the game folder: the copy in your Steam library,
 folder you pick or create with **Change folder** (the card says **Folder picked** until
 Install has run). Play then starts `CoDSP.exe` or `CoDMP.exe`. Remove deletes the files it
 installed and puts back any game file it replaced.
+
+**Install 1.1X (Multiplayer patch)** goes on top of 1.1 and stays greyed out until 1.1 is
+in place: it is the community 1.1X build the 1.1/1.1x servers use, also published in this
+project's release. It replaces `CoDMP.exe` and adds `cod1x.dll`; Remove puts 1.1's
+`CoDMP.exe` back.
+
+**United Offensive** is not looked for in Steam, and it is never written into the Call of
+Duty (2003) folder, where its files would sit next to the 1.1 ones and clash with them.
+**Change folder** picks (or creates) the folder it goes in. Its archive is not pinned yet,
+so the card takes the folder and nothing else for now.
 
 **Black Ops 4 (Project BO4).** Install puts Shield's official launcher in the game
 folder, as its guide says, after backing up your `BlackOps4.exe` and `LPC` files. It

@@ -1272,12 +1272,16 @@ Describe 'Game catalogue' {
             $game = Get-CatalogGame -Id $id
             $game | Should -Not -BeNullOrEmpty -Because $id
             $game.Available | Should -BeTrue -Because $id
-            @($game.SteamAppIds).Count | Should -BeGreaterThan 0 -Because $id
             @($game.ValidFiles | Where-Object { $_ -like '*.exe' }).Count | Should -Be 2 -Because $id
             @($game.Clients).Count | Should -Be 0 -Because $id
             @($game.Modes).Count | Should -Be 0 -Because $id
             $game.Note | Should -Not -BeNullOrEmpty -Because $id
         }
+        # United Offensive is not looked for in Steam at all: it goes where the player
+        # picks. Call of Duty 2 is still found through Steam.
+        @((Get-CatalogGame -Id 'coduo').SteamAppIds).Count | Should -Be 0
+        (Get-CatalogGame -Id 'coduo').Detect | Should -Be 'none'
+        @((Get-CatalogGame -Id 'cod2').SteamAppIds) | Should -Be @(2630)
     }
 
     It 'matches every client the CB launcher shows on its cards' {
@@ -1645,6 +1649,95 @@ Describe 'Call of Duty 1.1 archive client' {
         Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
         Test-Path -LiteralPath (Join-Path $cod1Folder 'main') | Should -BeFalse
         Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11') | Should -BeFalse
+    }
+
+    It 'pins 1.1X to this project''s release and puts it after 1.1' {
+        $game = Get-CatalogGame -Id 'cod1'
+        @($game.Clients | ForEach-Object { $_.Id }) | Should -Be @('cod1-v11', 'cod1-v11x')
+        $client = $game.Clients[1]
+        $client.Source | Should -Be 'archive'
+        $client.Extract | Should -BeTrue
+        $client.Archive.Url | Should -Be 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD1x_Archive.zip'
+        $client.Archive.Size | Should -Be 2067295
+        $client.Archive.Sha256 | Should -Be 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d'
+        @($client.Requires) | Should -Be @('cod1-v11')
+        # The patch ships CoDMP.exe and cod1x.dll, not the whole game: it is checked for
+        # its own file only.
+        @($client.RequiredFiles) | Should -Be @('CoDMP.exe')
+    }
+
+    It 'refuses 1.1X until 1.1 is installed' {
+        { Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11x' -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw '*goes on top of 1.1 (singleplayer and MP)*'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'cod1x.dll') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11x') | Should -BeFalse
+    }
+
+    It 'installs 1.1X on top of 1.1 and puts 1.1 back on removal' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $global:cod1xArchive = Join-Path $TestDrive ('cod1x-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod1xArchive -Entries ([ordered]@{ 'CoDMP.exe' = '1.1x mp'; 'cod1x.dll' = 'patch' })
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:cod1xArchive -Destination $Destination -Force; return 0 }
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11x' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1x mp'
+        Get-Text (Join-Path $cod1Folder 'cod1x.dll') | Should -Be 'patch'
+        # 1.1X replaces the multiplayer executable only; 1.1's own files are left alone.
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be '1.1 sp'
+        Get-Text (Join-Path $cod1Folder 'main\pak0.pk3') | Should -Be 'data'
+        Test-GameClientInstalled -GameFolder $cod1Folder -ClientId 'cod1-v11' | Should -BeTrue
+        Test-GameClientInstalled -GameFolder $cod1Folder -ClientId 'cod1-v11x' | Should -BeTrue
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11x' -GameFolder $cod1Folder
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1 mp'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'cod1x.dll') | Should -BeFalse
+    }
+
+    It 'fails 1.1X with a clear message when the patch does not ship its executable' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $wrong = (Get-CatalogGame -Id 'cod1').Clients[1].PSObject.Copy()
+        $wrong.Archive = @{ Url = 'https://example.com/wrong.zip'; Size = 1; Sha256 = ('D' * 64) }
+        Remove-Item -LiteralPath $global:cod1Archive -Force -ErrorAction SilentlyContinue
+        $global:wrongPatch = Join-Path $TestDrive ('cod1x-wrong-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:wrongPatch -Entries ([ordered]@{ 'cod1x.dll' = 'patch' })
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:wrongPatch -Destination $Destination -Force; return 0 }
+        { Install-GameClientArchive -Game (Get-CatalogGame -Id 'cod1') -Client $wrong -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw '*did not put CoDMP.exe*'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1 mp'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'cod1x.dll') | Should -BeFalse
+    }
+}
+
+Describe 'United Offensive folder install' {
+    BeforeEach {
+        $SettingsDirectory = Join-Path $TestDrive ('settings-' + [guid]::NewGuid().ToString('N'))
+        $SettingsFile = Join-Path $SettingsDirectory 'settings.json'
+        # A Steam library that happens to hold United Offensive files must not be picked up:
+        # the game is only the folder the player chooses.
+        $library = Join-Path $TestDrive ('library-' + [guid]::NewGuid().ToString('N'))
+        $uo = Join-Path $library 'steamapps\common\Call of Duty United Offensive'
+        $null = New-Item -ItemType Directory -Path $uo -Force
+        Set-Content -LiteralPath (Join-Path $uo 'CoDUOSP.exe') -Value 'fake'
+        Set-Content -LiteralPath (Join-Path $uo 'CoDUOMP.exe') -Value 'fake'
+        Mock Get-SteamLibraries { @($library) }
+        Mock Write-Host { }
+    }
+
+    It 'never looks for it in Steam' {
+        $game = Get-CatalogGame -Id 'coduo'
+        @($game.SteamAppIds).Count | Should -Be 0
+        $game.Detect | Should -Be 'none'
+        Find-CatalogGame -Game $game | Should -BeNullOrEmpty
+    }
+
+    It 'takes the folder the player picked, even an empty one' {
+        $game = Get-CatalogGame -Id 'coduo'
+        $game.AllowEmptyFolder | Should -BeTrue
+        $picked = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-picked-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Save-CatalogGameFolder -Id 'coduo' -Folder $picked | Should -BeTrue
+        try {
+            $found = Find-CatalogGame -Game $game
+            $found | Should -Not -BeNullOrEmpty
+            $found.Folder | Should -Be $picked
+            $found.Source | Should -Be 'saved'
+        } finally { $null = Save-CatalogGameFolder -Id 'coduo' -Folder '' }
     }
 }
 

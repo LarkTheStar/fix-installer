@@ -60,9 +60,12 @@ Order, from the least to the most involved:
 | 9 | Black Ops 4 | Project BO4 (Shield) | Install takes a while (about 2.2 GB through Shield's launcher); Play Online and Play Offline open Shield's launcher with your name in `project-bo4.json`; press Play Client; **Repair** if the screen stays black; Remove puts your `BlackOps4.exe` and LPC back; Battle.net Scan and Repair clean |
 | 10 | HorizonMW | HMW Launcher | Install opens the HMW Launcher: paste the MWR folder (on the clipboard), Verify game files; then **Play** on the card; Remove asks before deleting what the launcher added |
 
-United Offensive and Call of Duty 2 have cards that only find the game for now: there
+**United Offensive** takes any folder picked with **Change folder**, even an empty one:
+it is not looked for in Steam and it is never written into the Call of Duty (2003)
+folder, so the 1.1 files cannot clash with its own. Its archive is not pinned yet, so the
+card only takes the folder for now. **Call of Duty 2** only finds the game for now: there
 is no client to install yet, so checking the card says **Game found** with the right
-folder is all they can do. Add them to the table above once they have clients.
+folder is all it can do. Add both to the table above once they have clients.
 
 ## When something fails
 

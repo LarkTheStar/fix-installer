@@ -2699,13 +2699,17 @@ function New-CatalogClient {
         [string]$Description = '',
         # A release archive installed exactly as published: it goes into the game folder
         # as it is (pinned by SHA-256; its contents are not listed in the catalogue).
-        $Archive = $null, [bool]$Extract = $false
+        $Archive = $null, [bool]$Extract = $false,
+        # Clients this one is put on top of: they have to be installed first.
+        [string[]]$Requires = @(),
+        # Files the archive has to contain; the game's marker files when empty.
+        [string[]]$RequiredFiles = @()
     )
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
-        Archive = $Archive; Extract = $Extract }
+        Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles) }
 }
 
 function New-CatalogMode {
@@ -2771,8 +2775,14 @@ function Get-GameCatalog {
             Clients = @((New-CatalogClient -Id 'cod1-v11' -Name '1.1 (singleplayer and MP)' -Source 'archive' -Extract $true -Description 'Copies the 1.1 singleplayer and multiplayer files over your game folder.' -Archive @{
                     Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.1.SP.MP.zip'
                     Size = 1207836351
-                    Sha256 = '715bef06e94a98b5654fee62da81cd5f17ded051a88b84890e7df0db06c91652' }))
-            Note = 'Install 1.1 copies the singleplayer and multiplayer files from this project''s release over your game folder; your own files are backed up and put back by Remove.'
+                    Sha256 = '715bef06e94a98b5654fee62da81cd5f17ded051a88b84890e7df0db06c91652' }),
+                # 1.1X is a community multiplayer patch that goes on top of 1.1: it replaces
+                # CoDMP.exe and adds cod1x.dll. The 1.1/1.1x servers use it.
+                (New-CatalogClient -Id 'cod1-v11x' -Name '1.1X (Multiplayer patch)' -Source 'archive' -Extract $true -Requires @('cod1-v11') -RequiredFiles @('CoDMP.exe') -Description 'Installs the community 1.1X multiplayer patch on top of 1.1. Install 1.1 (singleplayer and MP) first.' -Archive @{
+                    Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD1x_Archive.zip'
+                    Size = 2067295
+                    Sha256 = 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d' }))
+            Note = 'Install 1.1 copies the singleplayer and multiplayer files from this project''s release over your game folder; your own files are backed up and put back by Remove. 1.1X goes on top of 1.1 (install 1.1 first); Remove puts 1.1 back.'
             Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDSP.exe' -Clients @('cod1-v11')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDMP.exe' -Clients @('cod1-v11')))
             # The 1.1 archive is the whole singleplayer and multiplayer file set, so a folder
             # the player picks or creates is enough: Install writes the game files there.
@@ -2780,11 +2790,15 @@ function Get-GameCatalog {
             Available = $true; UnavailableReason = '' }
         # United Offensive and Call of Duty 2: cards only for now. They find the game and
         # list it; a client can be added when there is one to place.
-        [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(2640); Detect = 'steam'
+        # United Offensive is installed where the player says, not into the Call of Duty
+        # (2003) folder, where its files would sit next to the 1.1 ones and clash with
+        # them. Nothing is looked for in Steam: the folder is the one picked.
+        [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(); Detect = 'none'
             ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
             NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
             Clients = @(); Modes = @()
-            Note = 'No client to install yet: the card finds the game and nothing else for now.'
+            Note = 'Pick the folder to put United Offensive in with Change folder: it is not looked for in Steam, and it is not installed over Call of Duty (2003).'
+            AllowEmptyFolder = $true
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
             ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
@@ -3025,7 +3039,10 @@ function Find-CatalogGame {
     param([Parameter(Mandatory)]$Game)
             $saved = Get-CatalogGameFolder -Id $Game.Id
         if ($saved -and ((Test-CatalogGameFolder -Game $Game -Folder $saved) -or $Game.AllowEmptyFolder)) { return [pscustomobject]@{ Folder = $saved; Source = 'saved' } }
-    foreach ($library in @(Get-SteamLibraries)) {
+    # A game that is not looked for anywhere (United Offensive is installed where the
+    # player says): only the folder picked with Change folder counts.
+    $libraries = if ($Game.Detect -eq 'none') { @() } else { @(Get-SteamLibraries) }
+    foreach ($library in $libraries) {
         foreach ($appId in $Game.SteamAppIds) {
             $manifest = Join-Path $library "steamapps\appmanifest_$appId.acf"
             if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { continue }
@@ -3039,7 +3056,7 @@ function Find-CatalogGame {
     }
     # A game's own appmanifest can be missing after a move or a manual copy. Look
     # through each library's common folder for the game's marker files before giving up.
-    foreach ($library in @(Get-SteamLibraries)) {
+    foreach ($library in $libraries) {
         $common = Join-Path $library 'steamapps\common'
         if (-not (Test-Path -LiteralPath $common -PathType Container)) { continue }
         foreach ($directory in @(Get-ChildItem -LiteralPath $common -Directory -Force -ErrorAction SilentlyContinue)) {
@@ -3462,13 +3479,18 @@ function Install-GameClientArchive {
     # The archive has to be the game's own file set: every marker file must have been
     # written by it. Anything else means the wrong ZIP or a different layout, so the
     # extraction is undone and nothing is installed.
+    # A patch archive replaces only part of the file set (1.1X ships CoDMP.exe and
+    # cod1x.dll), so a client says which files it must put in place; the game's own
+    # marker files when it does not.
+    $required = @($Client.RequiredFiles)
+    if ($required.Count -eq 0) { $required = @($Game.ValidFiles) }
     $writtenPaths = @{}
     foreach ($file in $files) { $writtenPaths[([string]$file.Path).ToLowerInvariant()] = $true }
-    $missing = @($Game.ValidFiles | Where-Object { -not $writtenPaths.ContainsKey($_.ToLowerInvariant()) })
+    $missing = @($required | Where-Object { -not $writtenPaths.ContainsKey($_.ToLowerInvariant()) })
     if ($missing.Count -gt 0) {
         $undone = Undo-ZipExtraction -Journal $journal
         if ($undone -and (Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
-        throw "The archive did not put $(($missing -join ' and ')) in $GameFolder, so it is not the $($Game.Name) file set. Nothing was installed: the folder is as it was. Check that the ZIP you published contains $($Game.ValidFiles -join ' and ') at its top level, or inside one folder."
+        throw "The archive did not put $(($missing -join ' and ')) in $GameFolder, so it is not the $($Game.Name) file set. Nothing was installed: the folder is as it was. Check that the ZIP you published contains $($required -join ' and ') at its top level, or inside one folder."
     }
 
     # Files the previous install wrote that this archive no longer has: put the original
@@ -3509,7 +3531,10 @@ function Install-GameClient {
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
     if ($null -eq $client) { throw "$($game.Name) has no client '$ClientId'." }
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
-    if (-not $GameFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
+    if (-not $GameFolder) {
+        if ($game.Detect -eq 'none') { throw "$($game.Name) is not detected: pick its folder with Change folder first." }
+        throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder."
+    }
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
     if (-not (Test-CatalogGameFolder -Game $game -Folder $GameFolder)) {
         # A game whose client ships the whole file set (Call of Duty 2003) can be put in a
@@ -3524,6 +3549,12 @@ function Install-GameClient {
             if ((Read-Host "Install $($client.Name) downloads the archive into that folder and may replace files with the same names. Continue? [y/N]") -notmatch '^(y|yes)$') { Stop-Cancelled 'Nothing was installed.' }
         }
         Write-Info "$GameFolder does not have $($game.Name) yet; $($client.Name) puts its files there."
+    }
+    # A client that goes on top of another one (1.1X on 1.1) needs that one in place first.
+    foreach ($need in @($client.Requires)) {
+        if (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $need) { continue }
+        $needName = Get-CatalogClientName $need $game
+        throw "$($client.Name) goes on top of $needName. Install $needName first; nothing was changed."
     }
     foreach ($other in @($client.Conflicts)) {
         if (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $other) {
@@ -3759,8 +3790,12 @@ function Remove-GameClient {
             } else { Write-Info 'The added files were kept.' }
         }
     }
+    # A client that sits on top of another one (1.1X on 1.1) backed up that client's own
+    # file, so removing it puts that file back even though the other client owns the path.
+    $layered = @($(if ($client) { @($client.Requires) } else { @() }))
     foreach ($backup in @($record.Backups)) {
-        if ($owners.ContainsKey(([string]$backup.Target).ToLowerInvariant())) { continue }
+        $owner = $owners[[string]$backup.Target.ToLowerInvariant()]
+        if ($owner -and $layered -notcontains [string]$owner.ClientId) { continue }
         if (Test-Path -LiteralPath ([string]$backup.Backup) -PathType Leaf) { Copy-FileAtomically -Source ([string]$backup.Backup) -Destination ([string]$backup.Target); $restored++ }
     }
     foreach ($dir in @(@($record.CreatedDirs) | Sort-Object { ([string]$_).Length } -Descending)) {
@@ -4101,7 +4136,10 @@ function Start-CatalogGame {
     $mode = $game.Modes | Where-Object { $_.Id -eq $ModeId } | Select-Object -First 1
     if ($null -eq $mode) { throw "$($game.Name) has no mode '$ModeId'." }
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
-    if (-not $GameFolder) { throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder." }
+    if (-not $GameFolder) {
+        if ($game.Detect -eq 'none') { throw "$($game.Name) is not detected: pick its folder with Change folder first." }
+        throw "$($game.Name) was not found. Install it from Steam or pick its folder with Change folder."
+    }
     $blocker = Get-ModeBlocker -Game $game -Mode $mode -GameFolder $GameFolder
     if ($blocker) { throw $blocker }
     $build = Get-GameBuildInfo -Game $game -GameFolder $GameFolder
@@ -7289,7 +7327,7 @@ function Update-GamesPage {
         $null = $header.Children.Add($pill)
         $null = $header.Children.Add((& $text ("{0}  ({1})" -f $game.Name, $game.Year) 'TextPrimary' 16 'Bold'))
         $null = $panel.Children.Add($header)
-        $where = if ($found) { "Folder: $($found.Folder)" } elseif ($game.Detect -eq 'folder') { 'Not on Steam: pick its folder with Change folder.' } else { 'Not found in your Steam libraries.' }
+        $where = if ($found) { "Folder: $($found.Folder)" } elseif ($game.Detect -in @('folder', 'none')) { 'Not on Steam: pick its folder with Change folder.' } else { 'Not found in your Steam libraries.' }
         $line = & $text $where; $line.Margin = '0,4,0,0'; $null = $panel.Children.Add($line)
         if ($found) {
             foreach ($client in $game.Clients) {
@@ -7325,8 +7363,9 @@ function Update-GamesPage {
                     $null = $buttons.Children.Add((& $button "Remove $($client.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $client.Id }))
                 } else {
                     $conflict = @($client.Conflicts | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_ }) | Select-Object -First 1
-                    $tip = if ($conflict) { "Remove $(Get-CatalogClientName $conflict) first: both replace the same files." } elseif ($client.Description) { $client.Description } else { '' }
-                    $null = $buttons.Children.Add((& $button "Install $($client.Name)" @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict)))
+                    $need = @($client.Requires | Where-Object { -not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_) }) | Select-Object -First 1
+                    $tip = if ($conflict) { "Remove $(Get-CatalogClientName $conflict) first: both replace the same files." } elseif ($need) { "Install $(Get-CatalogClientName $need $game) first: this goes on top of it." } elseif ($client.Description) { $client.Description } else { '' }
+                    $null = $buttons.Children.Add((& $button "Install $($client.Name)" @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict -and -not $need)))
                 }
             }
             if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
