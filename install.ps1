@@ -3095,6 +3095,23 @@ function Find-CatalogGame {
 function Get-ClientRecordPath { param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId) Join-Path $GameFolder ('.codhq-client-' + $ClientId + '.json') }
 function Get-ClientBackupRoot { param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId) Join-Path $GameFolder ('.codhq-backups\' + $ClientId) }
 
+# An install that failed leaves an empty backup folder behind (the undo takes the files
+# out of it); it goes, so the game folder holds nothing at all of the attempt.
+function Clear-EmptyClientBackupRoot {
+    param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$BackupRoot)
+    if (Test-Path -LiteralPath $BackupRoot -PathType Container) {
+        # The undo emptied the folders the moved files were kept in; deepest first.
+        foreach ($dir in @(Get-ChildItem -LiteralPath $BackupRoot -Recurse -Directory -Force -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending)) {
+            if (-not (Get-ChildItem -LiteralPath $dir.FullName -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if (-not (Get-ChildItem -LiteralPath $BackupRoot -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $BackupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $base = Join-Path $GameFolder '.codhq-backups'
+    if ((Test-Path -LiteralPath $base -PathType Container) -and -not (Get-ChildItem -LiteralPath $base -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $base -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Read-ClientRecord {
     param([Parameter(Mandatory)][string]$GameFolder, [Parameter(Mandatory)][string]$ClientId)
     $path = Get-ClientRecordPath -GameFolder $GameFolder -ClientId $ClientId
@@ -3492,14 +3509,6 @@ function Install-GameClientArchive {
             return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = 0; Current = @($previous.Files).Count; Derived = 0; Kept = 0; Skipped = 0 }
         }
     }
-    # A clean install empties the folder, so a client that sits on top of this one goes
-    # first (1.1X before 1.1); it is installed again afterwards.
-    if ($Client.CleanInstall) {
-        foreach ($dependent in @(Get-InstalledDependentClients -Game $Game -ClientId $Client.Id -GameFolder $GameFolder)) {
-            Write-Info "Removing $($dependent.Name) first: $($Client.Name) is installed as a clean copy."
-            Remove-GameClient -GameId $Game.Id -ClientId $dependent.Id -GameFolder $GameFolder
-        }
-    }
     $stage = Join-Path $env:TEMP ('codhq-archive-' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $stage -Force
     $zipPath = Join-Path $stage (([string]$archive.Url -split '/')[-1])
@@ -3510,6 +3519,19 @@ function Install-GameClientArchive {
     try {
         Write-Info "Downloading $($Client.Name): $(([string]$archive.Url -split '/')[-1])"
         $null = Invoke-ResumableDownload -Url ([string]$archive.Url) -Destination $zipPath -Label "Downloading $($Client.Name)" -ExpectedSha256 ([string]$archive.Sha256) -RetryDelaySeconds $RetryDelaySeconds
+        # Only now that the archive is on disk and its SHA-256 is verified: a clean install
+        # empties the folder, so a client that sits on top of this one (1.1X on 1.1) has to
+        # go before that. Removing it earlier would leave the player without the patch if a
+        # 1.2 GB download then failed.
+        if ($Client.CleanInstall) {
+            foreach ($dependent in @(Get-InstalledDependentClients -Game $Game -ClientId $Client.Id -GameFolder $GameFolder)) {
+                Write-Info "Removing $($dependent.Name) first: $($Client.Name) is installed as a clean copy. Install it again afterwards."
+                Remove-GameClient -GameId $Game.Id -ClientId $dependent.Id -GameFolder $GameFolder
+            }
+            # That removal deleted a record, so what the folder holds is no longer what was
+            # read at the start.
+            $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $Client.Id
+        }
         $root = Get-GameArchiveRoot -ZipPath $zipPath
         if ($root) { Write-Info "The archive keeps its files in '$root\'; they are copied in without it." }
         if ($Client.CleanInstall) {
@@ -3525,6 +3547,7 @@ function Install-GameClientArchive {
         Write-Warn "Installing $($Client.Name) failed; putting back what was changed..."
         $undone = Undo-ZipExtraction -Journal $journal
         if ($undone -and (Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
+        Clear-EmptyClientBackupRoot -GameFolder $GameFolder -BackupRoot $backupRoot
         throw
     } finally {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
@@ -3567,6 +3590,7 @@ function Install-GameClientArchive {
     if ($missing.Count -gt 0) {
         $undone = Undo-ZipExtraction -Journal $journal
         if ($undone -and (Test-Path -LiteralPath $runBackup -PathType Container) -and -not (Get-ChildItem -LiteralPath $runBackup -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $runBackup -Force -ErrorAction SilentlyContinue }
+        Clear-EmptyClientBackupRoot -GameFolder $GameFolder -BackupRoot $backupRoot
         throw "The archive did not put $(($missing -join ' and ')) in $GameFolder, so it is not the $($Game.Name) file set. Nothing was installed: the folder is as it was. Check that the ZIP you published contains $($required -join ' and ') at its top level, or inside one folder."
     }
 

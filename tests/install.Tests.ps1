@@ -1676,6 +1676,46 @@ Describe 'Call of Duty 1.1 archive client' {
         Test-Path -LiteralPath (Join-Path $cod1Folder '.codhq-backups') | Should -BeFalse
     }
 
+    It 'leaves 1.1X in place when the 1.1 download fails' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $global:cod1xArchive = Join-Path $TestDrive ('cod1x-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod1xArchive -Entries ([ordered]@{ 'CoDMP.exe' = '1.1x mp'; 'cod1x.dll' = 'patch' })
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:cod1xArchive -Destination $Destination -Force; return 0 }
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11x' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Get-Text (Join-Path $cod1Folder 'cod1x.dll') | Should -Be 'patch'
+        Mock Invoke-ResumableDownload { throw 'The download failed.' }
+        # A file is missing, so 1.1 is installed again instead of reported as up to date.
+        Remove-Item -LiteralPath (Join-Path $cod1Folder 'main\pak0.pk3') -Force
+        { Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw
+        # The patch is still there: it is only taken away once the archive is verified.
+        Test-GameClientInstalled -GameFolder $cod1Folder -ClientId 'cod1-v11x' | Should -BeTrue
+        Get-Text (Join-Path $cod1Folder 'cod1x.dll') | Should -Be 'patch'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1x mp'
+    }
+
+    It 'puts every moved-aside file back when the extraction fails part-way' {
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'steam_api.dll') -Value 'steam'
+        $null = New-Item -ItemType Directory -Path (Join-Path $cod1Folder 'main') -Force
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'main\pak0.pk3') -Value 'old data'
+        $null = New-Item -ItemType Directory -Path (Join-Path $cod1Folder 'Docs') -Force
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'Docs\readme.txt') -Value 'docs'
+        # The archive writes a file called 'main' and then a file inside 'main': the second
+        # one cannot be extracted, so the install stops half-way through.
+        Remove-Item -LiteralPath $global:cod1Archive -Force -ErrorAction SilentlyContinue
+        New-TestZip -Path $global:cod1Archive -Entries ([ordered]@{ 'CoDSP.exe' = '1.1 sp'; 'main' = 'not a folder'; 'main\pak0.pk3' = '1.1 data' })
+        { Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw
+        # Every file the clean install moved aside is back where it was...
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'steam_api.dll') | Should -Be 'steam'
+        Get-Text (Join-Path $cod1Folder 'main\pak0.pk3') | Should -Be 'old data'
+        Get-Text (Join-Path $cod1Folder 'Docs\readme.txt') | Should -Be 'docs'
+        (Get-Item -LiteralPath (Join-Path $cod1Folder 'main')).PSIsContainer | Should -BeTrue
+        # ...and nothing of the half-done install is left.
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod1Folder '.codhq-backups') | Should -BeFalse
+    }
+
     It 'takes 1.1X away when 1.1 is installed again over it' {
         $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
         $global:cod1xArchive2 = Join-Path $TestDrive ('cod1x-' + [guid]::NewGuid().ToString('N') + '.zip')

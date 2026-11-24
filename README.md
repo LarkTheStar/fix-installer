@@ -165,7 +165,9 @@ there and puts every original file back, so the folder ends up as it was before.
 in place: it is the community 1.1X build the 1.1/1.1x servers use, also published in this
 project's release. Its four files (`CoDMP.exe`, `cod1x.dll`, `CoDMP_old.exe` and its
 uninstall script) are copied in as they are; **Remove** deletes them and puts 1.1's
-`CoDMP.exe` back, and installing 1.1 again takes 1.1X away first.
+`CoDMP.exe` back. Installing 1.1 again takes 1.1X away first, but only once the new
+archive has downloaded and its SHA-256 has checked out: a failed download leaves the
+patch in place.
 
 **United Offensive** is not looked for in Steam, and it is never written into the Call of
 Duty (2003) folder, where its files would sit next to the 1.1 ones and clash with them.
