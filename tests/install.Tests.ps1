@@ -1610,9 +1610,86 @@ Describe 'Call of Duty 1.1 archive client' {
         Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $busy -ClientId 'cod1-v11') | Should -BeFalse
         Mock Read-Host { 'y' }
         $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $busy -RetryDelaySeconds 0
-        Get-Text (Join-Path $busy 'notes.txt') | Should -Be 'my stuff'
+        # The folder is emptied into the backup first, so it holds the 1.1 files only...
+        Test-Path -LiteralPath (Join-Path $busy 'notes.txt') | Should -BeFalse
         Get-Text (Join-Path $busy 'CoDMP.exe') | Should -Be '1.1 mp'
         Get-Text (Join-Path $busy 'CoDSP.exe') | Should -Be '1.1 sp'
+        # ...and Remove gives the player's own file back.
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $busy
+        Get-Text (Join-Path $busy 'notes.txt') | Should -Be 'my stuff'
+    }
+
+    It 'empties the folder except the two executables, then puts everything back on removal' {
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'steam_api.dll') -Value 'steam'
+        $null = New-Item -ItemType Directory -Path (Join-Path $cod1Folder 'main') -Force
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'main\pak0.pk3') -Value 'old data'
+        $null = New-Item -ItemType Directory -Path (Join-Path $cod1Folder 'Docs') -Force
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'Docs\readme.txt') -Value 'docs'
+        Remove-Item -LiteralPath $global:cod1Archive -Force -ErrorAction SilentlyContinue
+        New-TestZip -Path $global:cod1Archive -Entries ([ordered]@{ 'CoDSP.exe' = '1.1 sp'; 'CoDMP.exe' = '1.1 mp'; 'main\pak0.pk3' = '1.1 data'; 'main\pak1.pk3' = '1.1 extra' })
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        # Nothing but the archive's own files is left in the folder: no old file to clash.
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'steam_api.dll') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'Docs') | Should -BeFalse
+        Get-Text (Join-Path $cod1Folder 'main\pak0.pk3') | Should -Be '1.1 data'
+        Get-Text (Join-Path $cod1Folder 'main\pak1.pk3') | Should -Be '1.1 extra'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be '1.1 sp'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1 mp'
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'steam_api.dll') | Should -Be 'steam'
+        Get-Text (Join-Path $cod1Folder 'main\pak0.pk3') | Should -Be 'old data'
+        Get-Text (Join-Path $cod1Folder 'Docs\readme.txt') | Should -Be 'docs'
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'main\pak1.pk3') | Should -BeFalse
+    }
+
+    It 'keeps the installer''s own records and backups when it empties the folder' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $cod1Folder '.codhq-backups') | Should -BeTrue
+        # Installing again must not move the record or the backup out of the folder.
+        Remove-Item -LiteralPath (Join-Path $cod1Folder 'main\pak0.pk3') -Force
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Get-Text (Join-Path $cod1Folder 'main\pak0.pk3') | Should -Be 'data'
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+    }
+
+    It 'takes 1.1X with it when 1.1 is removed, and puts every original file back' {
+        Set-Content -LiteralPath (Join-Path $cod1Folder 'steam_api.dll') -Value 'steam'
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $global:cod1xArchive = Join-Path $TestDrive ('cod1x-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod1xArchive -Entries ([ordered]@{ 'CoDMP.exe' = '1.1x mp'; 'cod1x.dll' = 'patch'; 'CoDMP_old.exe' = '1.1 old'; 'CoDExtended_Uninstall.vbs' = 'vbs' })
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:cod1xArchive -Destination $Destination -Force; return 0 }
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11x' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1x mp'
+        Remove-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder
+        Test-GameClientInstalled -GameFolder $cod1Folder -ClientId 'cod1-v11x' | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod1Folder -ClientId 'cod1-v11x') | Should -BeFalse
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be 'retail mp'
+        Get-Text (Join-Path $cod1Folder 'CoDSP.exe') | Should -Be 'retail sp'
+        Get-Text (Join-Path $cod1Folder 'steam_api.dll') | Should -Be 'steam'
+        foreach ($gone in 'cod1x.dll', 'CoDMP_old.exe', 'CoDExtended_Uninstall.vbs', 'main') {
+            Test-Path -LiteralPath (Join-Path $cod1Folder $gone) | Should -BeFalse -Because $gone
+        }
+        Test-Path -LiteralPath (Join-Path $cod1Folder '.codhq-backups') | Should -BeFalse
+    }
+
+    It 'takes 1.1X away when 1.1 is installed again over it' {
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        $global:cod1xArchive2 = Join-Path $TestDrive ('cod1x-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod1xArchive2 -Entries ([ordered]@{ 'CoDMP.exe' = '1.1x mp'; 'cod1x.dll' = 'patch' })
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:cod1xArchive2 -Destination $Destination -Force; return 0 }
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11x' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'cod1x.dll') | Should -BeTrue
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $global:cod1Archive -Destination $Destination -Force; return 0 }
+        # A file is missing, so 1.1 is installed again instead of reported as up to date.
+        Remove-Item -LiteralPath (Join-Path $cod1Folder 'main\pak0.pk3') -Force
+        $null = Install-GameClient -GameId 'cod1' -ClientId 'cod1-v11' -GameFolder $cod1Folder -RetryDelaySeconds 0
+        Test-GameClientInstalled -GameFolder $cod1Folder -ClientId 'cod1-v11x' | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod1Folder 'cod1x.dll') | Should -BeFalse
+        Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1 mp'
     }
 
     It 'fails with a clear message and changes nothing when the archive has no game executables' {
@@ -1662,8 +1739,8 @@ Describe 'Call of Duty 1.1 archive client' {
         $client.Archive.Sha256 | Should -Be 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d'
         @($client.Requires) | Should -Be @('cod1-v11')
         # The patch ships CoDMP.exe and cod1x.dll, not the whole game: it is checked for
-        # its own file only.
-        @($client.RequiredFiles) | Should -Be @('CoDMP.exe')
+        # its own files only.
+        @($client.RequiredFiles) | Should -Be @('CoDMP.exe', 'cod1x.dll')
     }
 
     It 'refuses 1.1X until 1.1 is installed' {

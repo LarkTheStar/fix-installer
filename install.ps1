@@ -2266,6 +2266,12 @@ function Undo-ZipExtraction {
                     if (Test-Path -LiteralPath $change.Path -PathType Leaf) { Remove-Item -LiteralPath $change.Path -Force -ErrorAction Stop }
                     Move-Item -LiteralPath $change.Backup -Destination $change.Path -Force -ErrorAction Stop
                 }
+                'Wiped' {
+                    $parent = Split-Path -Parent $change.Path
+                    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+                    if (Test-Path -LiteralPath $change.Path -PathType Leaf) { Remove-Item -LiteralPath $change.Path -Force -ErrorAction Stop }
+                    Move-Item -LiteralPath $change.Backup -Destination $change.Path -Force -ErrorAction Stop
+                }
                 'Directory' {
                     if ((Test-Path -LiteralPath $change.Path -PathType Container) -and -not (Get-ChildItem -LiteralPath $change.Path -Force | Select-Object -First 1)) {
                         Remove-Item -LiteralPath $change.Path -Force -ErrorAction Stop
@@ -2703,13 +2709,17 @@ function New-CatalogClient {
         # Clients this one is put on top of: they have to be installed first.
         [string[]]$Requires = @(),
         # Files the archive has to contain; the game's marker files when empty.
-        [string[]]$RequiredFiles = @()
+        [string[]]$RequiredFiles = @(),
+        # Everything in the game folder except KeepFiles is moved into the backup before
+        # the archive is extracted, so it lands in a folder of its own files only.
+        [bool]$CleanInstall = $false, [string[]]$KeepFiles = @()
     )
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
-        Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles) }
+        Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
+        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles) }
 }
 
 function New-CatalogMode {
@@ -2772,17 +2782,17 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'cod1'; Name = 'Call of Duty'; Year = '2003'; SteamAppIds = @(2620); Detect = 'steam'
             ValidFiles = @('CoDSP.exe', 'CoDMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
             NeedsElevation = $false; DpiFix = @('CoDSP.exe', 'CoDMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @((New-CatalogClient -Id 'cod1-v11' -Name '1.1 (singleplayer and MP)' -Source 'archive' -Extract $true -Description 'Copies the 1.1 singleplayer and multiplayer files over your game folder.' -Archive @{
+            Clients = @((New-CatalogClient -Id 'cod1-v11' -Name '1.1 (singleplayer and MP)' -Source 'archive' -Extract $true -CleanInstall $true -KeepFiles @('CoDSP.exe', 'CoDMP.exe') -Description 'Moves everything in the game folder except CoDSP.exe and CoDMP.exe into the backup, then copies the 1.1 files in.' -Archive @{
                     Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.1.SP.MP.zip'
                     Size = 1207836351
                     Sha256 = '715bef06e94a98b5654fee62da81cd5f17ded051a88b84890e7df0db06c91652' }),
                 # 1.1X is a community multiplayer patch that goes on top of 1.1: it replaces
                 # CoDMP.exe and adds cod1x.dll. The 1.1/1.1x servers use it.
-                (New-CatalogClient -Id 'cod1-v11x' -Name '1.1X (Multiplayer patch)' -Source 'archive' -Extract $true -Requires @('cod1-v11') -RequiredFiles @('CoDMP.exe') -Description 'Installs the community 1.1X multiplayer patch on top of 1.1. Install 1.1 (singleplayer and MP) first.' -Archive @{
+                (New-CatalogClient -Id 'cod1-v11x' -Name '1.1X (Multiplayer patch)' -Source 'archive' -Extract $true -Requires @('cod1-v11') -RequiredFiles @('CoDMP.exe', 'cod1x.dll') -Description 'Installs the community 1.1X multiplayer patch on top of 1.1. Install 1.1 (singleplayer and MP) first.' -Archive @{
                     Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD1x_Archive.zip'
                     Size = 2067295
                     Sha256 = 'c2b31367dfbe418b1415c4ab8183fb51e6e2baadc70870d405fbba85ff19814d' }))
-            Note = 'Install 1.1 copies the singleplayer and multiplayer files from this project''s release over your game folder; your own files are backed up and put back by Remove. 1.1X goes on top of 1.1 (install 1.1 first); Remove puts 1.1 back.'
+            Note = 'Install 1.1 moves everything in the game folder except CoDSP.exe and CoDMP.exe into the backup, then copies the 1.1 files in, so nothing old is left to clash with them. 1.1X goes on top of 1.1: install 1.1 first. Remove takes 1.1X and 1.1 away and puts every original file back.'
             Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDSP.exe' -Clients @('cod1-v11')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDMP.exe' -Clients @('cod1-v11')))
             # The 1.1 archive is the whole singleplayer and multiplayer file set, so a folder
             # the player picks or creates is enough: Install writes the game files there.
@@ -3417,6 +3427,57 @@ function Get-WatchedGameFiles {
 # journaled, a game file it replaces is moved into the client's backup folder first, and
 # the record lists every file, so Remove puts the folder back exactly. The archive is
 # pinned by SHA-256; its contents are deliberately not listed anywhere.
+# Clients installed on top of another one (1.1X sits on top of 1.1), newest first: they
+# have to go when the one below them is removed or installed again.
+function Get-InstalledDependentClients {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$GameFolder)
+    return @($Game.Clients | Where-Object { $_.Id -ne $ClientId -and @($_.Requires) -contains $ClientId -and (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_.Id) })
+}
+
+# Moves everything in a game folder into a backup folder except a few files (the two Call
+# of Duty (2003) executables), so an archive is extracted into a folder that holds nothing
+# but its own files. Everything it moves is in the backup, so Remove puts the folder back
+# the way it was before the install.
+function Move-GameFolderAside {
+    param(
+        [Parameter(Mandatory)][string]$GameFolder,
+        [Parameter(Mandatory)][string]$BackupDirectory,
+        [string[]]$Keep = @(),
+        # Files this client wrote itself: the archive writes them again, so they are not
+        # worth a backup.
+        [hashtable]$SkipTargets = @{},
+        [System.Collections.Generic.List[object]]$Journal = $null
+    )
+    $kept = @{}
+    foreach ($name in @($Keep)) { $kept[$name.ToLowerInvariant()] = $true }
+    $root = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
+    $prefix = $root + '\'
+    $moved = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        $full = $file.FullName
+        $relative = $full.Substring($prefix.Length)
+        $top = ($relative -split '\\')[0]
+        if ($kept.ContainsKey($top.ToLowerInvariant())) { continue }
+        # The installer's own backups and install records stay where they are.
+        if ($top -ieq '.codhq-backups' -or $file.Name -like '.codhq-client-*.json') { continue }
+        if ($SkipTargets.ContainsKey($full.ToLowerInvariant())) { Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue; continue }
+        $backupPath = Join-Path $BackupDirectory ('wiped\' + $relative)
+        $parent = Split-Path $backupPath -Parent
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+        Move-Item -LiteralPath $full -Destination $backupPath -Force -ErrorAction Stop
+        if ($null -ne $Journal) { $Journal.Add([pscustomobject]@{ Kind = 'Wiped'; Path = $full; Backup = $backupPath }) }
+        $moved++
+    }
+    # Folders left empty go too, deepest first; restoring a file makes its folder again.
+    foreach ($dir in @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending)) {
+        $relative = $dir.FullName.Substring($prefix.Length)
+        $top = ($relative -split '\\')[0]
+        if ($kept.ContainsKey($top.ToLowerInvariant()) -or $top -ieq '.codhq-backups') { continue }
+        if (-not (Get-ChildItem -LiteralPath $dir.FullName -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    return $moved
+}
+
 function Install-GameClientArchive {
     param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
     $archive = $Client.Archive
@@ -3431,6 +3492,14 @@ function Install-GameClientArchive {
             return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = 0; Current = @($previous.Files).Count; Derived = 0; Kept = 0; Skipped = 0 }
         }
     }
+    # A clean install empties the folder, so a client that sits on top of this one goes
+    # first (1.1X before 1.1); it is installed again afterwards.
+    if ($Client.CleanInstall) {
+        foreach ($dependent in @(Get-InstalledDependentClients -Game $Game -ClientId $Client.Id -GameFolder $GameFolder)) {
+            Write-Info "Removing $($dependent.Name) first: $($Client.Name) is installed as a clean copy."
+            Remove-GameClient -GameId $Game.Id -ClientId $dependent.Id -GameFolder $GameFolder
+        }
+    }
     $stage = Join-Path $env:TEMP ('codhq-archive-' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $stage -Force
     $zipPath = Join-Path $stage (([string]$archive.Url -split '/')[-1])
@@ -3443,6 +3512,13 @@ function Install-GameClientArchive {
         $null = Invoke-ResumableDownload -Url ([string]$archive.Url) -Destination $zipPath -Label "Downloading $($Client.Name)" -ExpectedSha256 ([string]$archive.Sha256) -RetryDelaySeconds $RetryDelaySeconds
         $root = Get-GameArchiveRoot -ZipPath $zipPath
         if ($root) { Write-Info "The archive keeps its files in '$root\'; they are copied in without it." }
+        if ($Client.CleanInstall) {
+            $previousTargets = @{}
+            if ($previous) { foreach ($f in @($previous.Files)) { $previousTargets[([string]$f.Target).ToLowerInvariant()] = $true } }
+            Write-Info "Moving everything in $GameFolder except $(@($Client.KeepFiles) -join ' and ') into the backup ..."
+            $aside = Move-GameFolderAside -GameFolder $GameFolder -BackupDirectory $runBackup -Keep @($Client.KeepFiles) -SkipTargets $previousTargets -Journal $journal
+            Write-Info "Files moved aside: $aside. They are all in the backup, and Remove puts them back as they were."
+        }
         Write-Info "Copying $($Client.Name) into $GameFolder ..."
         Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $runBackup -StripPrefix $root
     } catch {
@@ -3463,6 +3539,7 @@ function Install-GameClientArchive {
     if ($previous) { foreach ($d in @($previous.CreatedDirs)) { $createdDirs.Add([string]$d) } }
     foreach ($change in $journal) {
         if ($change.Kind -eq 'Directory') { $createdDirs.Add([string]$change.Path); continue }
+        if ($change.Kind -eq 'Wiped') { $backups.Add([pscustomobject]@{ Target = [string]$change.Path; Backup = [string]$change.Backup }); continue }
         $full = [string]$change.Path
         if ($change.Kind -eq 'Replaced') {
             # What Expand-ZipOverwrite moved aside is the file the previous install wrote;
@@ -3752,6 +3829,12 @@ function Remove-GameClient {
     $GameFolder = [IO.Path]::GetFullPath($GameFolder).TrimEnd('\')
     $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $ClientId
     if ($null -eq $record) { Write-Info "$ClientId is not installed in $GameFolder."; return }
+    # A client installed on top of this one goes first (1.1X before 1.1), so a revert puts
+    # every file of the folder back and not just this client's.
+    foreach ($dependent in @(Get-InstalledDependentClients -Game $game -ClientId $ClientId -GameFolder $GameFolder)) {
+        Write-Info "Removing $($dependent.Name) first: it was installed on top of $($record.ClientName)."
+        Remove-GameClient -GameId $GameId -ClientId $dependent.Id -GameFolder $GameFolder
+    }
     $owners = Get-ClientFileOwnerMap -GameFolder $GameFolder -ExceptClientId $ClientId
     $removed = 0; $restored = 0; $shared = 0
     foreach ($file in @($record.Files)) {

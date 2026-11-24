@@ -154,13 +154,18 @@ need a free Plutonium account: use **Plutonium login** once.
 **Call of Duty (2003).** Install 1.1 writes the singleplayer and multiplayer files from
 this project's own release into the game folder: the copy in your Steam library, or any
 folder you pick or create with **Change folder** (the card says **Folder picked** until
-Install has run). Play then starts `CoDSP.exe` or `CoDMP.exe`. Remove deletes the files it
-installed and puts back any game file it replaced.
+Install has run). First it moves everything in that folder except `CoDSP.exe` and
+`CoDMP.exe` into the backup, then it copies the 1.1 files in and backs up anything they
+overwrite. That way no older file of the game is left next to the 1.1 ones; a folder like
+that is what makes multiplayer show *User Interface is version 9, expected 7*. Play then
+starts `CoDSP.exe` or `CoDMP.exe`. **Remove** takes 1.1X with it, deletes what 1.1 put
+there and puts every original file back, so the folder ends up as it was before.
 
 **Install 1.1X (Multiplayer patch)** goes on top of 1.1 and stays greyed out until 1.1 is
 in place: it is the community 1.1X build the 1.1/1.1x servers use, also published in this
-project's release. It replaces `CoDMP.exe` and adds `cod1x.dll`; Remove puts 1.1's
-`CoDMP.exe` back.
+project's release. Its four files (`CoDMP.exe`, `cod1x.dll`, `CoDMP_old.exe` and its
+uninstall script) are copied in as they are; **Remove** deletes them and puts 1.1's
+`CoDMP.exe` back, and installing 1.1 again takes 1.1X away first.
 
 **United Offensive** is not looked for in Steam, and it is never written into the Call of
 Duty (2003) folder, where its files would sit next to the 1.1 ones and clash with them.
