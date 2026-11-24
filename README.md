@@ -179,7 +179,9 @@ the client's own site publishes that writes the key into the registry: `cod1.1_(
 takes a key the site hands out per player, and `coduo1.51.reg` takes one key that is the
 same for everybody. Install keeps both `.reg` files in `key\` exactly as they were
 published, saves the keys next to them (`key\codkey.txt`, `key\coduo-key.txt`), fills in
-the key, the game's path and its drive, and hands each file to the registry editor. The
+the key, the game's path, its drive and the game version (`"Version"="1.5"` and
+`"Version"="1.51"`, which the published files do not both name), and hands each file to the
+registry editor. The
 editor asks whether to add it and asks Windows for administrator rights itself, so click
 **Yes** on both. The filled in copies stay as `key\codhq-server-key.reg` and
 `key\codhq-uo-server-key.reg`, so a merge that was refused or cancelled can be finished by

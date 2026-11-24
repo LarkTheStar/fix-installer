@@ -2824,16 +2824,23 @@ function Get-GameCatalog {
                     @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.5.zip'; Size = 1236721212; Sha256 = 'a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb' },
                     @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 973056769; Sha256 = '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2' }) -ServerKey @(
                     # The first safety system: a key the client's site hands out per player.
-                    @{ Name = 'cod1.1 (x64)'
+                    @{ Name = 'Call of Duty 1.5'
                        RegUrl = 'https://de.dvotx.org/dump/cod1/cod1.1_%28x64%29.reg'
                        KeyUrl = 'https://de.dvotx.org/dump/cod1/downloads.php?get=codkey'
-                       ValueName = 'codkey'; KeyFileName = 'codkey.txt'; CopyName = 'codhq-server-key.reg'; Folder = 'key' },
+                       ValueName = 'codkey'; KeyFileName = 'codkey.txt'; CopyName = 'codhq-server-key.reg'; Folder = 'key'
+                       # The values the game reads: 1.5 is what this client installs (the
+                       # published file still says 1.1), the path ends in a backslash and the
+                       # drive is the letter on its own.
+                       Version = '1.5'; PathEndsWithBackslash = $true },
                     # The second one: its own .reg file with one key that is the same for
                     # every player, so there is no page to download it from.
                     @{ Name = 'United Offensive 1.51'
                        RegUrl = 'https://de.dvotx.org/dump/cod1/coduo1.51.reg'
                        Key = '8QGWZ8333ZRAXWBG9CE9'
-                       ValueName = 'key'; KeyFileName = 'coduo-key.txt'; CopyName = 'codhq-uo-server-key.reg'; Folder = 'key' })))
+                       ValueName = 'key'; KeyFileName = 'coduo-key.txt'; CopyName = 'codhq-uo-server-key.reg'; Folder = 'key'
+                       # This one wants no trailing backslash in the path and the drive as a
+                       # root, "D:\\" in the file (D:\ in the registry).
+                       Version = '1.51'; DriveWithBackslash = $true })))
             Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDUOSP.exe' -Clients @('uo-15')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDUOMP.exe' -Clients @('uo-15')))
             Note = 'Pick an empty folder with Change folder: Install copies the 1.5 game and the United Offensive 1.5 files into it, then sets up the two server keys the client''s servers ask for (both kept in key\). Set up server key does that again on its own, without downloading the game again. It is not looked for in Steam, and it is not installed over Call of Duty (2003).'
             AllowEmptyFolder = $true; RequireEmptyFolder = $true
@@ -3550,19 +3557,49 @@ function Read-ServerKey {
 }
 
 # Gives one "name"="value" line of a .reg file a new value, keeping its indentation, its
-# quotes and the spacing around the '=' exactly as they were.
+# quotes and the spacing around the '=' exactly as they were. A line the file leaves out is
+# added below the $AddAfter line (or at the end of the file), so every value the game reads
+# is in the file even when the one the site publishes forgets one of them.
 function Set-RegLineValue {
-    param([string]$Text, [Parameter(Mandatory)][string]$Name, [string]$Value = '')
-    $pattern = '(?im)^([ \t]*"' + [regex]::Escape($Name) + '"[ \t]*=[ \t]*)("[^"\r\n]*")'
+    param([string]$Text, [Parameter(Mandatory)][string]$Name, [string]$Value = '', [string]$AddAfter = '')
+    $pattern = '(?im)^([ \t]*"' + [regex]::Escape($Name) + '"[ \t]*=[ \t]*)(\"[^\"\r\n]*\")'
     $replacement = '$1"' + $Value.Replace('$', '$$') + '"'
-    return [regex]::Replace($Text, $pattern, $replacement)
+    if ([regex]::IsMatch($Text, $pattern)) { return [regex]::Replace($Text, $pattern, $replacement) }
+    $newline = if ($Text.IndexOf("`r`n") -ge 0) { "`r`n" } else { "`n" }
+    $lines = [System.Collections.Generic.List[string]]::new([string[]]($Text -split '\r?\n'))
+    $anchor = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match ('(?i)^[ \t]*"' + [regex]::Escape($AddAfter) + '"[ \t]*=')) { $anchor = $i; break }
+    }
+    $line = '"' + $Name + '"="' + $Value + '"'
+    if ($anchor -ge 0) { $lines.Insert($anchor + 1, $line) } else { $lines.Insert([Math]::Max(0, $lines.Count - 1), $line) }
+    return ($lines -join $newline)
 }
 
-# Writes the key, the game's path and its drive into the .reg file's own lines, and leaves
-# the encoding (ANSI, UTF-16 with or without a BOM, UTF-8) as it was. The value name is the
-# one that file uses for the key: codkey in cod1.1_(x64).reg, key in coduo1.51.reg.
+# Writes the key, the game's path, its drive and the game version into the .reg file's own
+# lines, and leaves the encoding (ANSI, UTF-16 with or without a BOM, UTF-8) as it was. The
+# value name is the one that file uses for the key: codkey in cod1.1_(x64).reg, key in
+# coduo1.51.reg.
+#
+# The two files do not write the path and the drive the same way, and the values the games
+# read are not the ones the published files carry. cod1.1_(x64).reg wants the path with a
+# trailing backslash ("...\Call of Duty\\" in the file, one backslash in the registry) and
+# the bare drive letter ("D:"), and it still names 1.1 while this client installs 1.5.
+# coduo1.51.reg wants the path without the trailing backslash and the drive as a root
+# ("D:\\", that is D:\ in the registry). So the spec says which shape each one is, and the
+# version comes from it too. A .reg string writes one backslash as two.
 function Set-ServerKeyRegFile {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$GameFolder, [string]$ValueName = 'codkey')
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        # Empty when the key page holds no key that can be read: the copy is written with
+        # the path, the drive and the version all the same, and the player adds the key.
+        [string]$Key = '',
+        [Parameter(Mandatory)][string]$GameFolder,
+        [string]$ValueName = 'codkey',
+        [string]$Version = '',
+        [switch]$PathEndsWithBackslash,
+        [switch]$DriveWithBackslash
+    )
     $bytes = [IO.File]::ReadAllBytes($Path)
     $encoding = [Text.Encoding]::GetEncoding(1252)
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { $encoding = New-Object System.Text.UnicodeEncoding($false, $true) }
@@ -3571,12 +3608,17 @@ function Set-ServerKeyRegFile {
     $text = $encoding.GetString($bytes)
     if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
     # A .reg string writes one backslash as two, so the path is doubled.
-    $pathValue = $GameFolder.Replace('\', '\\')
+    $pathValue = $GameFolder.TrimEnd('\').Replace('\', '\\')
+    if ($PathEndsWithBackslash) { $pathValue += '\\' }
     $drive = [IO.Path]::GetPathRoot($GameFolder)
-    if ($drive) { $drive = $drive.TrimEnd('\') } else { $drive = '' }
+    if ($drive) {
+        $drive = $drive.TrimEnd('\').Replace('\', '\\')
+        if ($DriveWithBackslash) { $drive += '\\' }
+    } else { $drive = '' }
     if ($Key) { $text = Set-RegLineValue -Text $text -Name $ValueName -Value $Key }
     $text = Set-RegLineValue -Text $text -Name 'InstallPath' -Value $pathValue
-    $text = Set-RegLineValue -Text $text -Name 'InstallDrive' -Value $drive
+    $text = Set-RegLineValue -Text $text -Name 'InstallDrive' -Value $drive -AddAfter 'InstallPath'
+    if ($Version) { $text = Set-RegLineValue -Text $text -Name 'Version' -Value $Version -AddAfter 'InstallDrive' }
     if ($text -notmatch ('(?im)^[ \t]*"' + [regex]::Escape($ValueName) + '"[ \t]*=')) { throw ('The downloaded registry file has no "' + $ValueName + '" line to put the server key in. It was left as it came.') }
     [IO.File]::WriteAllText($Path, $text, $encoding)
     return $true
@@ -3628,6 +3670,11 @@ function Install-ServerKeyReg {
     $valueName = if ([string]::IsNullOrWhiteSpace([string]$Spec.ValueName)) { 'codkey' } else { [string]$Spec.ValueName }
     $keyFileName = if ([string]::IsNullOrWhiteSpace([string]$Spec.KeyFileName)) { 'codkey.txt' } else { [string]$Spec.KeyFileName }
     $copyName = if ([string]::IsNullOrWhiteSpace([string]$Spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$Spec.CopyName }
+    # The shape of the path and the drive, and the version the installed game is (see
+    # Set-ServerKeyRegFile): the spec carries them.
+    $version = ([string]$Spec.Version).Trim()
+    $pathEndsWithBackslash = [bool]$Spec.PathEndsWithBackslash
+    $driveWithBackslash = [bool]$Spec.DriveWithBackslash
     $keyDir = Get-ServerKeyFolder -Spec $Spec -GameFolder $GameFolder
     $null = New-Item -ItemType Directory -Path $keyDir -Force
     $stage = Join-Path $env:TEMP ('codhq-serverkey-' + [guid]::NewGuid().ToString('N'))
@@ -3658,12 +3705,12 @@ function Install-ServerKeyReg {
         # page: its path and its drive are filled in, so only the key has to be added by hand.
         $copy = Join-Path $keyDir $copyName
         Copy-Item -LiteralPath $regPath -Destination $copy -Force
-        $null = Set-ServerKeyRegFile -Path $copy -Key $key -GameFolder $GameFolder -ValueName $valueName
+        $null = Set-ServerKeyRegFile -Path $copy -Key $key -GameFolder $GameFolder -ValueName $valueName -Version $version -PathEndsWithBackslash:$pathEndsWithBackslash -DriveWithBackslash:$driveWithBackslash
         if (-not $key) {
             Write-Warn "The file the site hands out for the key ($keyPath) does not hold a key that can be read. The registry file is ready in ${copy}: put the key into its $valueName line, save it and double-click it. The one as published is in $rawCopy."
             return $false
         }
-        Write-Info "Writing the key, the path and the drive into the registry: $regName"
+        Write-Info "Writing the key, the path, the drive and the version into the registry: $regName"
         Write-Info 'The registry editor opens and asks whether to add the key: click Yes (Windows may ask for administrator rights first).'
         $imported = Import-ServerKeyRegFile -Path $copy
         if ($imported.ExitCode -ne 0) {
@@ -3704,6 +3751,11 @@ function Test-ServerKeyInstalled {
         $copyName = if ([string]::IsNullOrWhiteSpace([string]$spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$spec.CopyName }
         $keyFileName = if ([string]::IsNullOrWhiteSpace([string]$spec.KeyFileName)) { 'codkey.txt' } else { [string]$spec.KeyFileName }
         foreach ($name in @($copyName, $keyFileName)) { if (-not (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf)) { return $false } }
+        # A copy that names another game version was written by an older setup (or by the
+        # published file's own 1.1): it is written again, so the registry gets the values the
+        # installed game reads.
+        $version = ([string]$spec.Version).Trim()
+        if ($version -and [IO.File]::ReadAllText((Join-Path $dir $copyName)) -notmatch ('(?im)^[ \t]*"Version"[ \t]*=[ \t]*"' + [regex]::Escape($version) + '"')) { return $false }
     }
     return $true
 }

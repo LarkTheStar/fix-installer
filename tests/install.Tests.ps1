@@ -1880,9 +1880,15 @@ Describe 'United Offensive folder install' {
         $client.ServerKey[0].RegUrl | Should -Match '^https://de\.dvotx\.org/'
         $client.ServerKey[0].KeyUrl | Should -Match '^https://de\.dvotx\.org/'
         $client.ServerKey[0].ValueName | Should -Be 'codkey'
+        # The values each .reg has to carry for the game to read them.
+        $client.ServerKey[0].Version | Should -Be '1.5'
+        $client.ServerKey[0].PathEndsWithBackslash | Should -BeTrue
+        [bool]$client.ServerKey[0].DriveWithBackslash | Should -BeFalse
         $client.ServerKey[1].RegUrl | Should -Be 'https://de.dvotx.org/dump/cod1/coduo1.51.reg'
         $client.ServerKey[1].Key | Should -Be '8QGWZ8333ZRAXWBG9CE9'
         $client.ServerKey[1].ValueName | Should -Be 'key'
+        $client.ServerKey[1].Version | Should -Be '1.51'
+        $client.ServerKey[1].DriveWithBackslash | Should -BeTrue
         # The second key is one for every player, so nothing is downloaded for it.
         [string]::IsNullOrWhiteSpace([string]$client.ServerKey[1].KeyUrl) | Should -BeTrue
         @($client.ServerKey | ForEach-Object { $_.Folder }) | Should -Be @('key', 'key')
@@ -1914,7 +1920,8 @@ Describe 'United Offensive folder install' {
             '[HKEY_CURRENT_USER\Software\Call of Duty]'
             '"codkey"="PUT-THE-KEY-HERE"'
             '"InstallPath"="C:\\Games\\Call of Duty"'
-            '"InstallDrive"="C:"')
+            '"InstallDrive"="C:"'
+            '"Version"="1.1"')
         $global:uoSecondReg = Join-Path $TestDrive ('server-uo-' + [guid]::NewGuid().ToString('N') + '.reg')
         Set-Content -LiteralPath $global:uoSecondReg -Value @(
             'Windows Registry Editor Version 5.00'
@@ -1922,7 +1929,8 @@ Describe 'United Offensive folder install' {
             '[HKEY_CURRENT_USER\Software\Call of Duty United Offensive]'
             '"key"="PUT-THE-KEY-HERE"'
             '"InstallPath"="C:\\Program Files (x86)\\Activision\\Call of Duty United Offensive"'
-            '"InstallDrive"="C:"')
+            '"InstallDrive"="C:"'
+            '"Version"="1.51"')
         $global:uoKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
         Set-Content -LiteralPath $global:uoKey -Value 'ABCD1234EFGH5678IJKL'
         Mock Invoke-ResumableDownload {
@@ -1947,19 +1955,26 @@ Describe 'United Offensive folder install' {
         @($record.Backups).Count | Should -Be 0
         @($record.Files).Count | Should -Be 5
         # The first key is saved where the player can find it, and both registry files got
-        # the key, the path and the drive, quotes and all.
+        # the key, the path, the drive and the version the game reads, quotes and all.
         Test-Path -LiteralPath (Join-Path $folder 'key\codkey.txt') | Should -BeTrue
-        $escaped = [regex]::Escape($folder.Replace('\', '\\'))
-        $drive = [regex]::Escape([IO.Path]::GetPathRoot($folder).TrimEnd('\'))
+        $escaped = [regex]::Escape($folder.TrimEnd('\').Replace('\', '\\'))
+        # cod1.1_(x64).reg: the path ends in a backslash, the drive is the letter alone.
+        $driveLetter = [regex]::Escape([IO.Path]::GetPathRoot($folder).TrimEnd('\'))
+        # coduo1.51.reg: no trailing backslash, the drive is a root ("D:\\").
+        $driveRoot = [regex]::Escape([IO.Path]::GetPathRoot($folder).TrimEnd('\').Replace('\', '\\') + '\\')
         $reg = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-server-key.reg') -Raw
         $reg | Should -Match '"codkey"="ABCD1234EFGH5678IJKL"'
-        $reg | Should -Match ('"InstallPath"="' + $escaped + '"')
-        $reg | Should -Match ('"InstallDrive"="' + $drive + '"')
+        $reg | Should -Match ('"InstallPath"="' + $escaped + '\\\\"')
+        $reg | Should -Match ('"InstallDrive"="' + $driveLetter + '"')
+        # The published file still names 1.1; this client installs 1.5.
+        $reg | Should -Match '"Version"="1\.5"'
+        $reg | Should -Not -Match '"Version"="1\.1"'
         # The second key needs no download: it is the same for every player.
         $second = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') -Raw
         $second | Should -Match '"key"="8QGWZ8333ZRAXWBG9CE9"'
         $second | Should -Match ('"InstallPath"="' + $escaped + '"')
-        $second | Should -Match ('"InstallDrive"="' + $drive + '"')
+        $second | Should -Match ('"InstallDrive"="' + $driveRoot + '"')
+        $second | Should -Match '"Version"="1\.51"'
         Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '8QGWZ8333ZRAXWBG9CE9'
         # Both .reg files are also kept exactly as the site published them.
         Test-Path -LiteralPath (Join-Path $folder 'key\cod1.1_(x64).reg') | Should -BeTrue
@@ -2011,6 +2026,12 @@ Describe 'United Offensive folder install' {
         Test-Path -LiteralPath (Join-Path $folder 'key\codkey.txt') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $folder 'key\cod1.1_(x64).reg') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $folder 'key\codhq-server-key.reg') | Should -BeTrue
+        # The copy carries the path, the drive and the version even though the published
+        # file only had the key line: the registry editor needs all of them.
+        $copy = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-server-key.reg') -Raw
+        $copy | Should -Match '"InstallPath"='
+        $copy | Should -Match '"InstallDrive"='
+        $copy | Should -Match '"Version"="1\.5"'
         # ...and the second key, which needs no download, is set up anyway.
         $second = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') -Raw
         $second | Should -Match '"key"="8QGWZ8333ZRAXWBG9CE9"'

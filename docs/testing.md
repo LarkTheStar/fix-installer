@@ -73,12 +73,14 @@ the client's site. Each key is its own `.reg` file, and each one opens the regis
 which asks whether to add it: click **Yes** (Windows asks for administrator rights first).
 Check that `key\` ends up with both `.reg` files as published (`cod1.1_(x64).reg`,
 `coduo1.51.reg`), both keys (`codkey.txt`, `coduo-key.txt`), the filled in copies
-(`codhq-server-key.reg`, `codhq-uo-server-key.reg`) and that the log says both keys are set
+(`codhq-server-key.reg`, `codhq-uo-server-key.reg`) with `"Version"="1.5"` in the first and
+`"Version"="1.51"` in the second, and that the log says both keys are set
 up. **Set up server key** on the card must do the same again in a few seconds, without
 downloading the game. Then Play must start `CoDUOSP.exe` and `CoDUOMP.exe`, and Remove must
 take the files and `key\` away again. The keys come from the client's own site, so try the
 whole flow again if a download fails; when the page holds no key that can be read, the
-`.reg` is still in `key\` with its path and drive filled in, and the log says what to put in
+`.reg` is still in `key\` with its path, drive and version filled in, and the log says what
+to put in
 it by hand. **Call of Duty 2** only finds the game for now: there is no client to install
 yet, so checking the card says **Game found** with the right folder is all it can do.
 
