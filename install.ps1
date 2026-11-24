@@ -2717,17 +2717,18 @@ function New-CatalogClient {
         # United Offensive 1.5 files). They are the game's own layout and are not opened
         # to look for a wrapper folder.
         [object[]]$Archives = @(),
-        # The key the client's own servers ask for: the .reg file its site publishes and
-        # the page that hands the key out. Install fills the key and the game's path into
-        # the .reg and imports it.
-        $ServerKey = $null
+        # The registry files the client's own servers ask for, each with the key that goes
+        # in it: the .reg its site publishes, the page that hands a personal key out (or
+        # one key for everybody), and the name the file uses for the key. Install fills the
+        # key and the game's path into each .reg and has the registry editor add it.
+        $ServerKey = @()
     )
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
         Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
-        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ServerKey = $ServerKey }
+        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ServerKey = @(@($ServerKey) | Where-Object { $null -ne $_ }) }
 }
 
 function New-CatalogMode {
@@ -2815,16 +2816,26 @@ function Get-GameCatalog {
             ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
             NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
             # The 1.5 game files, then the United Offensive 1.5 files over them, then the
-            # server key: the client servers of this build ask for one, and its own site
-            # hands it out together with a .reg file that writes it into the registry.
-            Clients = @((New-CatalogClient -Id 'uo-15' -Name '1.5 (game and United Offensive)' -Source 'archive' -Extract $true -RequiredFiles @('CoDUOSP.exe', 'CoDUOMP.exe') -Description 'Downloads the 1.5 game and the United Offensive 1.5 files, copies them into the empty folder you picked, then gets the server key from the client''s site and installs it.' -Archives @(
+            # two server keys: the client servers of this build have two safety systems,
+            # and each one is a .reg file its own site publishes that writes the key into
+            # the registry. The first takes a key handed out per player, the second one key
+            # for everybody.
+            Clients = @((New-CatalogClient -Id 'uo-15' -Name '1.5 (game and United Offensive)' -Source 'archive' -Extract $true -RequiredFiles @('CoDUOSP.exe', 'CoDUOMP.exe') -Description 'Downloads the 1.5 game and the United Offensive 1.5 files, copies them into the empty folder you picked, then sets up the two server keys the client''s servers ask for.' -Archives @(
                     @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.5.zip'; Size = 1236721212; Sha256 = 'a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb' },
-                    @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 973056769; Sha256 = '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2' }) -ServerKey @{
-                    RegUrl = 'https://de.dvotx.org/dump/cod1/cod1.1_%28x64%29.reg'
-                    KeyUrl = 'https://de.dvotx.org/dump/cod1/downloads.php?get=codkey'
-                    Folder = 'key' }))
+                    @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 973056769; Sha256 = '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2' }) -ServerKey @(
+                    # The first safety system: a key the client's site hands out per player.
+                    @{ Name = 'cod1.1 (x64)'
+                       RegUrl = 'https://de.dvotx.org/dump/cod1/cod1.1_%28x64%29.reg'
+                       KeyUrl = 'https://de.dvotx.org/dump/cod1/downloads.php?get=codkey'
+                       ValueName = 'codkey'; KeyFileName = 'codkey.txt'; CopyName = 'codhq-server-key.reg'; Folder = 'key' },
+                    # The second one: its own .reg file with one key that is the same for
+                    # every player, so there is no page to download it from.
+                    @{ Name = 'United Offensive 1.51'
+                       RegUrl = 'https://de.dvotx.org/dump/cod1/coduo1.51.reg'
+                       Key = '8QGWZ8333ZRAXWBG9CE9'
+                       ValueName = 'key'; KeyFileName = 'coduo-key.txt'; CopyName = 'codhq-uo-server-key.reg'; Folder = 'key' })))
             Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDUOSP.exe' -Clients @('uo-15')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDUOMP.exe' -Clients @('uo-15')))
-            Note = 'Pick an empty folder with Change folder: Install copies the 1.5 game and the United Offensive 1.5 files into it, then puts the server key the client''s site hands out in key\ and installs it. It is not looked for in Steam, and it is not installed over Call of Duty (2003).'
+            Note = 'Pick an empty folder with Change folder: Install copies the 1.5 game and the United Offensive 1.5 files into it, then sets up the two server keys the client''s servers ask for (both kept in key\). Set up server key does that again on its own, without downloading the game again. It is not looked for in Steam, and it is not installed over Call of Duty (2003).'
             AllowEmptyFolder = $true; RequireEmptyFolder = $true
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
@@ -3512,7 +3523,7 @@ function Move-GameFolderAside {
     return $moved
 }
 
-# The folder a client's server key is saved in (key\ unless the client says otherwise).
+# The folder a client's server key files are kept in (key\ unless the spec says otherwise).
 function Get-ServerKeyFolder {
     param($Spec, [Parameter(Mandatory)][string]$GameFolder)
     $name = if ($Spec -and -not [string]::IsNullOrWhiteSpace([string]$Spec.Folder)) { [string]$Spec.Folder } else { 'key' }
@@ -3548,9 +3559,10 @@ function Set-RegLineValue {
 }
 
 # Writes the key, the game's path and its drive into the .reg file's own lines, and leaves
-# the encoding (ANSI, UTF-16 with or without a BOM, UTF-8) as it was.
+# the encoding (ANSI, UTF-16 with or without a BOM, UTF-8) as it was. The value name is the
+# one that file uses for the key: codkey in cod1.1_(x64).reg, key in coduo1.51.reg.
 function Set-ServerKeyRegFile {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$GameFolder)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$GameFolder, [string]$ValueName = 'codkey')
     $bytes = [IO.File]::ReadAllBytes($Path)
     $encoding = [Text.Encoding]::GetEncoding(1252)
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { $encoding = New-Object System.Text.UnicodeEncoding($false, $true) }
@@ -3562,33 +3574,60 @@ function Set-ServerKeyRegFile {
     $pathValue = $GameFolder.Replace('\', '\\')
     $drive = [IO.Path]::GetPathRoot($GameFolder)
     if ($drive) { $drive = $drive.TrimEnd('\') } else { $drive = '' }
-    $text = Set-RegLineValue -Text $text -Name 'codkey' -Value $Key
+    if ($Key) { $text = Set-RegLineValue -Text $text -Name $ValueName -Value $Key }
     $text = Set-RegLineValue -Text $text -Name 'InstallPath' -Value $pathValue
     $text = Set-RegLineValue -Text $text -Name 'InstallDrive' -Value $drive
-    if ($text -notmatch '(?im)^[ \t]*"codkey"[ \t]*=') { throw "The downloaded registry file has no codkey line to put the server key in. It was left as it came." }
+    if ($text -notmatch ('(?im)^[ \t]*"' + [regex]::Escape($ValueName) + '"[ \t]*=')) { throw ('The downloaded registry file has no "' + $ValueName + '" line to put the server key in. It was left as it came.') }
     [IO.File]::WriteAllText($Path, $text, $encoding)
     return $true
 }
 
-# Importing a .reg file, in a function of its own so the tests can run the whole key setup
+# Merging a .reg file, in a function of its own so the tests can run the whole key setup
 # without writing anything into the registry of the machine running them.
+#
+# The file is handed to the registry editor, not to reg.exe: the editor asks the player to
+# confirm the merge ("Adding information can unintentionally change or delete values...")
+# and asks Windows for administrator rights when the file writes a machine-wide key, which
+# is exactly what double-clicking it does. reg.exe writes without asking and is refused
+# when the utility itself is not running as administrator, which is what the first attempt
+# hit. Prompted says the registry editor did the asking, so a closed editor does not mean
+# the player said yes.
 function Import-ServerKeyRegFile {
     param([Parameter(Mandatory)][string]$Path)
-    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
-    if (-not (Test-Path -LiteralPath $regExe -PathType Leaf)) { return [pscustomobject]@{ ExitCode = 1; Output = "$regExe was not found." } }
-    $output = & $regExe import $Path 2>&1
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($output | Out-String).Trim()) }
+    $regedit = Join-Path $env:SystemRoot 'System32\regedit.exe'
+    if (-not (Test-Path -LiteralPath $regedit -PathType Leaf)) {
+        # No registry editor to ask with: the silent import is all that is left.
+        $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+        if (-not (Test-Path -LiteralPath $regExe -PathType Leaf)) { return [pscustomobject]@{ ExitCode = 1; Output = "$regedit and $regExe were not found."; Prompted = $false } }
+        $output = & $regExe import $Path 2>&1
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($output | Out-String).Trim()); Prompted = $false }
+    }
+    try {
+        $process = Start-Process -FilePath $regedit -ArgumentList ('"' + $Path + '"') -PassThru
+    } catch {
+        # The administrator prompt was refused (or the editor could not start).
+        return [pscustomobject]@{ ExitCode = 1; Output = $_.Exception.Message; Prompted = $true }
+    }
+    if ($null -ne $process) { $process.WaitForExit() }
+    $code = if ($null -ne $process) { $process.ExitCode } else { 0 }
+    return [pscustomobject]@{ ExitCode = $code; Output = ''; Prompted = $true }
 }
 
-# The key the United Offensive client servers ask for: their site hands out a key and a
-# .reg file that writes it into the registry with the game's path next to it, and doing
-# that by hand is a puzzle. Install does the round trip: the .reg is downloaded exactly as
-# it is published, the key is saved for the player in key\, the codkey, InstallPath and
-# InstallDrive lines get the real values, and the file is imported. Neither download is
-# listed, opened or shown anywhere.
+# One registry file the client's servers ask for: the .reg is downloaded exactly as it is
+# published, the key and the game's path are written into its own lines, and the registry
+# editor adds it. A copy of the .reg stays in key\ whatever happens next, together with the
+# key, so the player can do it by hand if a step fails. Neither download is listed, opened
+# or shown anywhere.
 function Install-ServerKeyReg {
     param([Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
-    if ([string]::IsNullOrWhiteSpace([string]$Spec.RegUrl) -or [string]::IsNullOrWhiteSpace([string]$Spec.KeyUrl)) { throw 'The server key has no registry file or key page to download from.' }
+    $label = if ([string]::IsNullOrWhiteSpace([string]$Spec.Name)) { 'The server key' } else { [string]$Spec.Name }
+    if ([string]::IsNullOrWhiteSpace([string]$Spec.RegUrl)) { throw "$label has no registry file to download." }
+    $keyUrl = [string]$Spec.KeyUrl
+    $literal = ([string]$Spec.Key).Trim()
+    if (-not $literal -and [string]::IsNullOrWhiteSpace($keyUrl)) { throw "$label has no key page to download from." }
+    $valueName = if ([string]::IsNullOrWhiteSpace([string]$Spec.ValueName)) { 'codkey' } else { [string]$Spec.ValueName }
+    $keyFileName = if ([string]::IsNullOrWhiteSpace([string]$Spec.KeyFileName)) { 'codkey.txt' } else { [string]$Spec.KeyFileName }
+    $copyName = if ([string]::IsNullOrWhiteSpace([string]$Spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$Spec.CopyName }
     $keyDir = Get-ServerKeyFolder -Spec $Spec -GameFolder $GameFolder
     $null = New-Item -ItemType Directory -Path $keyDir -Force
     $stage = Join-Path $env:TEMP ('codhq-serverkey-' + [guid]::NewGuid().ToString('N'))
@@ -3600,28 +3639,74 @@ function Install-ServerKeyReg {
         $regPath = Join-Path $stage $regName
         Write-Info "Downloading the server key registry file: $regName"
         $null = Invoke-ResumableDownload -Url ([string]$Spec.RegUrl) -Destination $regPath -Label 'Downloading the server key registry file' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
-        $keyPath = Join-Path $keyDir 'codkey.txt'
-        Write-Info "Downloading the server key into $keyDir ..."
-        $null = Invoke-ResumableDownload -Url ([string]$Spec.KeyUrl) -Destination $keyPath -Label 'Downloading the server key' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
-        $key = Read-ServerKey -Path $keyPath
-        if (-not $key) { throw "The file the site hands out for the key ($keyPath) does not hold a key that can be read. It was kept there; open it and put the key into $regName by hand." }
-        Write-Ok "The server key is saved in $keyPath."
-        $null = Set-ServerKeyRegFile -Path $regPath -Key $key -GameFolder $GameFolder
-        $copy = Join-Path $keyDir 'codhq-server-key.reg'
+        # Exactly as published, kept even if the key below cannot be read out of the page.
+        $rawCopy = Join-Path $keyDir $regName
+        Copy-Item -LiteralPath $regPath -Destination $rawCopy -Force
+        $keyPath = Join-Path $keyDir $keyFileName
+        $key = ''
+        if ($literal) {
+            $key = $literal
+            Set-Content -LiteralPath $keyPath -Value $key -Encoding ASCII
+            Write-Ok "The server key is saved in $keyPath."
+        } else {
+            Write-Info "Downloading the server key into $keyDir ..."
+            $null = Invoke-ResumableDownload -Url $keyUrl -Destination $keyPath -Label 'Downloading the server key' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
+            $key = Read-ServerKey -Path $keyPath
+            if ($key) { Write-Ok "The server key is saved in $keyPath." }
+        }
+        # The copy the player gets is written even when the key could not be read out of the
+        # page: its path and its drive are filled in, so only the key has to be added by hand.
+        $copy = Join-Path $keyDir $copyName
         Copy-Item -LiteralPath $regPath -Destination $copy -Force
-        Write-Info "Writing the key, the path and the drive into the registry: $regName"
-        $imported = Import-ServerKeyRegFile -Path $regPath
-        if ($imported.ExitCode -ne 0) {
-            Write-Warn ("The registry file could not be imported ({0}). Double-click {1} to do it yourself: everything else is installed." -f $imported.Output, $copy)
+        $null = Set-ServerKeyRegFile -Path $copy -Key $key -GameFolder $GameFolder -ValueName $valueName
+        if (-not $key) {
+            Write-Warn "The file the site hands out for the key ($keyPath) does not hold a key that can be read. The registry file is ready in ${copy}: put the key into its $valueName line, save it and double-click it. The one as published is in $rawCopy."
             return $false
         }
-        Write-Ok "The server key is installed for $GameFolder. It and the registry file are also in $keyDir."
+        Write-Info "Writing the key, the path and the drive into the registry: $regName"
+        Write-Info 'The registry editor opens and asks whether to add the key: click Yes (Windows may ask for administrator rights first).'
+        $imported = Import-ServerKeyRegFile -Path $copy
+        if ($imported.ExitCode -ne 0) {
+            Write-Warn ("The registry editor could not add $regName ({0}). Double-click {1} to do it yourself: everything else is installed." -f $imported.Output, $copy)
+            return $false
+        }
+        if ($imported.Prompted) { Write-Info "The registry editor has closed: the key is in the registry if you clicked Yes. If you clicked No, double-click $copy." }
+        Write-Ok "$label is set up for $GameFolder. The key and the registry file are also in $keyDir."
         return $true
     } finally {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
+# Every registry file a client's servers ask for, one after the other: one of them failing
+# (no key in the page, an administrator prompt the player said no to) leaves the others
+# done and the game files alone.
+function Install-ServerKeys {
+    param($Specs, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
+    $list = @(@($Specs) | Where-Object { $null -ne $_ })
+    $done = 0; $failed = 0
+    foreach ($spec in $list) {
+        try { if (Install-ServerKeyReg -Spec $spec -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds) { $done++ } else { $failed++ } }
+        catch { Write-Warn "The server key was not installed: $($_.Exception.Message)"; $failed++ }
+    }
+    if ($list.Count -gt 1) { Write-Info "Server keys set up: $done of $($list.Count)." }
+    return [pscustomobject]@{ Total = $list.Count; Installed = $done; Failed = $failed; AllInstalled = ($list.Count -gt 0 -and $failed -eq 0) }
+}
+
+# Whether everything a client's key setup keeps in key\ (the filled in registry file and the
+# key) is already there.
+function Test-ServerKeyInstalled {
+    param($Specs, [Parameter(Mandatory)][string]$GameFolder)
+    $list = @(@($Specs) | Where-Object { $null -ne $_ })
+    if ($list.Count -eq 0) { return $true }
+    foreach ($spec in $list) {
+        $dir = Get-ServerKeyFolder -Spec $spec -GameFolder $GameFolder
+        $copyName = if ([string]::IsNullOrWhiteSpace([string]$spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$spec.CopyName }
+        $keyFileName = if ([string]::IsNullOrWhiteSpace([string]$spec.KeyFileName)) { 'codkey.txt' } else { [string]$spec.KeyFileName }
+        foreach ($name in @($copyName, $keyFileName)) { if (-not (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf)) { return $false } }
+    }
+    return $true
+}
 function Install-GameClientArchive {
     param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
     $archives = @(@($Client.Archives) | Where-Object { $null -ne $_ })
@@ -3642,10 +3727,11 @@ function Install-GameClientArchive {
         if ($missing.Count -eq 0) {
             Write-Ok "$($Client.Name) is already installed and up to date."
             $keyApplied = $false
-            # The server key is part of the install: Install fetches it again if its folder is gone.
-            if ($Client.ServerKey -and -not (Test-Path -LiteralPath (Get-ServerKeyFolder -Spec $Client.ServerKey -GameFolder $GameFolder) -PathType Container)) {
-                try { $keyApplied = [bool](Install-ServerKeyReg -Spec $Client.ServerKey -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds) }
-                catch { Write-Warn "The server key was not installed; the game files are: $($_.Exception.Message)" }
+            # The server keys are part of the install: Install sets them up again when what
+            # they leave in key\ is gone, without downloading the game again.
+            if (@($Client.ServerKey).Count -gt 0 -and -not (Test-ServerKeyInstalled -Specs $Client.ServerKey -GameFolder $GameFolder)) {
+                $keys = Install-ServerKeys -Specs $Client.ServerKey -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds
+                $keyApplied = [bool]$keys.AllInstalled
             }
             return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = 0; Current = @($previous.Files).Count; Derived = 0; Kept = 0; Skipped = 0; KeyInstalled = $keyApplied }
         }
@@ -3787,9 +3873,9 @@ function Install-GameClientArchive {
     # The server key last: a failure there leaves the game files installed, and the key the
     # site handed out is already in key\ for the player.
     $keyApplied = $false
-    if ($Client.ServerKey) {
-        try { $keyApplied = [bool](Install-ServerKeyReg -Spec $Client.ServerKey -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds) }
-        catch { Write-Warn "The server key was not installed; the game files are: $($_.Exception.Message)" }
+    if (@($Client.ServerKey).Count -gt 0) {
+        $keys = Install-ServerKeys -Specs $Client.ServerKey -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds
+        $keyApplied = [bool]$keys.AllInstalled
     }
     Write-Ok "$($Client.Name) is installed for $($Game.Name)."
     Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Files copied from the archive: {0}. Your own game files kept: {1}.', $files.Count, $backups.Count))
@@ -4054,7 +4140,7 @@ function Remove-GameClient {
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
     # The server key folder is part of what Install set up, so Remove takes it too.
     if ($client -and $client.ServerKey) {
-        $keyDir = Get-ServerKeyFolder -Spec $client.ServerKey -GameFolder $GameFolder
+        $keyDir = Get-ServerKeyFolder -Spec (@($client.ServerKey) | Where-Object { $null -ne $_ } | Select-Object -First 1) -GameFolder $GameFolder
         if (Test-Path -LiteralPath $keyDir -PathType Container) {
             Remove-Item -LiteralPath $keyDir -Recurse -Force -ErrorAction SilentlyContinue
             Write-Info "Removed the server key folder: $keyDir"
@@ -7516,6 +7602,18 @@ $global:GameActionMap = @{
         if (-not $hasGame) { Write-Info "That folder does not have $($game.Name) yet; Install puts its files there." }
         if (Save-CatalogGameFolder -Id $game.Id -Folder $dialog.SelectedPath) { Write-Ok "$($game.Name) folder saved: $($dialog.SelectedPath)" } }
     'install' = { param($t) $null = Install-GameClient -GameId $t.Game -ClientId $t.Client }
+    # The server key setup on its own: the registry files are downloaded again, filled in
+    # and added, without touching the gigabytes of game files.
+    'serverkey' = { param($t) $game = Get-CatalogGame -Id $t.Game
+        $client = $game.Clients | Where-Object { $_.Id -eq $t.Client } | Select-Object -First 1
+        if ($null -eq $client) { throw "$($game.Name) has no client '$($t.Client)'." }
+        $found = Find-CatalogGame -Game $game
+        if (-not $found) { throw "$($game.Name) was not found. Pick its folder with Change folder first." }
+        if (-not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id)) { throw "Install $($client.Name) first: the key setup writes the game's own path into the registry." }
+        $keyDir = Get-ServerKeyFolder -Spec (@($client.ServerKey) | Select-Object -First 1) -GameFolder $found.Folder
+        $keys = Install-ServerKeys -Specs $client.ServerKey -GameFolder $found.Folder
+        if ($keys.AllInstalled) { Write-Ok "The server keys are set up again for $($found.Folder)." }
+        else { Write-Warn "$($keys.Failed) of $($keys.Total) server keys were not set up. The files are in $keyDir." } }
     'repair' = { param($t) $game = Get-CatalogGame -Id $t.Game
         $found = Find-CatalogGame -Game $game
         if (-not $found) { throw "$($game.Name) was not found." }
@@ -7665,6 +7763,9 @@ function Update-GamesPage {
                 if (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id) {
                     $null = $buttons.Children.Add((& $button "Update $($client.Name)" @{ Action = 'update'; Game = $game.Id; Client = $client.Id }))
                     $null = $buttons.Children.Add((& $button "Remove $($client.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $client.Id }))
+                    if (@($client.ServerKey).Count -gt 0) {
+                        $null = $buttons.Children.Add((& $button 'Set up server key' @{ Action = 'serverkey'; Game = $game.Id; Client = $client.Id } 'Downloads the server key registry files again, fills in the key and the game folder and opens them in the registry editor: no game files are downloaded'))
+                    }
                 } else {
                     $conflict = @($client.Conflicts | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_ }) | Select-Object -First 1
                     $need = @($client.Requires | Where-Object { -not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_) }) | Select-Object -First 1

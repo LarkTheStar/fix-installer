@@ -115,7 +115,7 @@ and installs the community client that brings it back online:
 | Clients | Games |
 | --- | --- |
 | 1.1 singleplayer and multiplayer files, then 1.1X on top of it (this project's release) | Call of Duty (2003) |
-| 1.5 game files, United Offensive 1.5 over them, and the server key (this project's release and the client's own site) | United Offensive |
+| 1.5 game files, United Offensive 1.5 over them, and its two server keys (this project's release and the client's own site) | United Offensive |
 | Nothing yet: the card only finds the game | Call of Duty 2 |
 | Plutonium | World at War, Black Ops, Black Ops II (MP, Zombies), MW3 (MP) |
 | IW4x, AlterWare | MW2 (MP; campaign and Spec Ops), MW3 (campaign, Spec Ops) |
@@ -174,13 +174,19 @@ Duty (2003) folder, where its files would sit next to the 1.1 ones and clash wit
 **Change folder** picks (or creates) the folder it goes in, and that folder has to be
 empty: if it holds anything, Install says so and stops before downloading a byte. Install
 then copies the 1.5 game files in, copies the United Offensive 1.5 files over them, and
-finally sets up the server key these client servers ask for. The client's own site hands
-out a key and a `.reg` file that writes it into the registry, so Install saves the key in
-`key\` next to a copy of the `.reg`, fills in the key, the game's path and its drive, and
-imports it: `key\codkey.txt` and `key\codhq-server-key.reg` stay there for you, and if the
-import is refused, double-click that `.reg`. Play starts `CoDUOSP.exe` or `CoDUOMP.exe`,
-and **Remove** deletes what Install put there, `key\` included. Reinstalling goes through
-the same steps, so a folder it emptied again gets the key again.
+finally sets up the two server keys these client servers ask for. Each one is a `.reg` file
+the client's own site publishes that writes the key into the registry: `cod1.1_(x64).reg`
+takes a key the site hands out per player, and `coduo1.51.reg` takes one key that is the
+same for everybody. Install keeps both `.reg` files in `key\` exactly as they were
+published, saves the keys next to them (`key\codkey.txt`, `key\coduo-key.txt`), fills in
+the key, the game's path and its drive, and hands each file to the registry editor. The
+editor asks whether to add it and asks Windows for administrator rights itself, so click
+**Yes** on both. The filled in copies stay as `key\codhq-server-key.reg` and
+`key\codhq-uo-server-key.reg`, so a merge that was refused or cancelled can be finished by
+double-clicking them. **Set up server key** on the card runs that setup again on its own,
+without downloading the game again. Play starts `CoDUOSP.exe` or `CoDUOMP.exe`, and
+**Remove** deletes what Install put there, `key\` included. Reinstalling goes through the
+same steps, so a folder it emptied again gets the keys again.
 
 **Black Ops 4 (Project BO4).** Install puts Shield's official launcher in the game
 folder, as its guide says, after backing up your `BlackOps4.exe` and `LPC` files. It
