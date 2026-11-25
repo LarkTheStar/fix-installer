@@ -1843,6 +1843,14 @@ Describe 'United Offensive folder install' {
         $null = New-Item -ItemType Directory -Path $uo -Force
         Set-Content -LiteralPath (Join-Path $uo 'CoDUOSP.exe') -Value 'fake'
         Set-Content -LiteralPath (Join-Path $uo 'CoDUOMP.exe') -Value 'fake'
+        # The page the client's site shows: the key stands next to the game's name and a new
+        # one is printed for every request. Only the CODUO one is read out of it.
+        $global:uoKeyPage = Join-Path $TestDrive ('uo-key-page-' + [guid]::NewGuid().ToString('N') + '.html')
+        Set-Content -LiteralPath $global:uoKeyPage -Value @(
+            '<html><body><table>'
+            '<tr><td>COD1</td><td><a href="downloads.php?get=codkey">key</a></td><td>ABCD-1234-EFGH-5678-IJKL</td></tr>'
+            '<tr><td><b>CODUO</b></td><td><a href="downloads.php?get=coduokey">key</a></td><td>3G1K-HWJQ-TWUG-QAHW-8901</td></tr>'
+            '</table></body></html>')
         Mock Get-SteamLibraries { @($library) }
         Mock Write-Host { }
     }
@@ -1885,11 +1893,15 @@ Describe 'United Offensive folder install' {
         $client.ServerKey[0].PathEndsWithBackslash | Should -BeTrue
         [bool]$client.ServerKey[0].DriveWithBackslash | Should -BeFalse
         $client.ServerKey[1].RegUrl | Should -Be 'https://de.dvotx.org/dump/cod1/coduo1.51.reg'
-        $client.ServerKey[1].Key | Should -Be '8QGWZ8333ZRAXWBG9CE9'
+        # Its key is not fixed: the site prints a new one for every request, so each player
+        # gets a key of their own from the page, next to the name CODUO.
+        $client.ServerKey[1].KeyPageUrl | Should -Be 'https://de.dvotx.org/dump/cod1/downloads.php'
+        $client.ServerKey[1].KeyLabel | Should -Be 'CODUO'
+        [string]::IsNullOrWhiteSpace([string]$client.ServerKey[1].Key) | Should -BeTrue
         $client.ServerKey[1].ValueName | Should -Be 'key'
         $client.ServerKey[1].Version | Should -Be '1.51'
         $client.ServerKey[1].DriveWithBackslash | Should -BeTrue
-        # The second key is one for every player, so nothing is downloaded for it.
+        # The key file is the first key's route; the second one has the page.
         [string]::IsNullOrWhiteSpace([string]$client.ServerKey[1].KeyUrl) | Should -BeTrue
         @($client.ServerKey | ForEach-Object { $_.Folder }) | Should -Be @('key', 'key')
         $game = Get-CatalogGame -Id 'coduo'
@@ -1937,7 +1949,8 @@ Describe 'United Offensive folder install' {
         $global:uoKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
         Set-Content -LiteralPath $global:uoKey -Value 'ABCD1234EFGH5678IJKL'
         Mock Invoke-ResumableDownload {
-            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*get=codkey*') { Copy-Item -LiteralPath $global:uoKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKeyPage -Destination $Destination -Force; return 0 }
             if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:uoSecondReg -Destination $Destination -Force; return 0 }
             if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:uoReg -Destination $Destination -Force; return 0 }
             if ($Url -like '*UO.1.5.zip') { Copy-Item -LiteralPath $global:uoUo -Destination $Destination -Force; return 0 }
@@ -1973,13 +1986,13 @@ Describe 'United Offensive folder install' {
         # The published file still names 1.1; this client installs 1.5.
         $reg | Should -Match '"Version"="1\.5"'
         $reg | Should -Not -Match '"Version"="1\.1"'
-        # The second key needs no download: it is the same for every player.
+        # The second key is the one the page printed next to CODUO.
         $second = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') -Raw
-        $second | Should -Match '"key"="8QGWZ8333ZRAXWBG9CE9"'
+        $second | Should -Match '"key"="3G1K-HWJQ-TWUG-QAHW-8901"'
         $second | Should -Match ('"InstallPath"="' + $escaped + '"')
         $second | Should -Match ('"InstallDrive"="' + $driveRoot + '"')
         $second | Should -Match '"Version"="1\.51"'
-        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '8QGWZ8333ZRAXWBG9CE9'
+        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
         # Both .reg files are also kept exactly as the site published them.
         Test-Path -LiteralPath (Join-Path $folder 'key\cod1.1_(x64).reg') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $folder 'key\coduo1.51.reg') | Should -BeTrue
@@ -1990,6 +2003,9 @@ Describe 'United Offensive folder install' {
         Test-Path -LiteralPath (Join-Path $folder 'CoDUOMP.exe') | Should -BeTrue
         # Remove takes the install and the key folder with it.
         Remove-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder
+        # Removing the key added two more editor questions: each remove.reg asks for the
+        # values of the filled in file it belongs to to be deleted.
+        Should -Invoke Import-ServerKeyRegFile -Times 4 -Exactly
         Test-Path -LiteralPath (Join-Path $folder 'CoDUOSP.exe') | Should -BeFalse
         Test-Path -LiteralPath (Join-Path $folder 'uo') | Should -BeFalse
         Test-Path -LiteralPath (Join-Path $folder 'key') | Should -BeFalse
@@ -2016,7 +2032,8 @@ Describe 'United Offensive folder install' {
         $global:badKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
         Set-Content -LiteralPath $global:badKey -Value 'no key in here'
         Mock Invoke-ResumableDownload {
-            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:badKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*get=codkey*') { Copy-Item -LiteralPath $global:badKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKeyPage -Destination $Destination -Force; return 0 }
             if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:badSecondReg -Destination $Destination -Force; return 0 }
             if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:badReg -Destination $Destination -Force; return 0 }
             Copy-Item -LiteralPath $global:badGame -Destination $Destination -Force; return 0
@@ -2039,8 +2056,8 @@ Describe 'United Offensive folder install' {
         $copy | Should -Match '"Version"="1\.5"'
         # ...and the second key, which needs no download, is set up anyway.
         $second = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') -Raw
-        $second | Should -Match '"key"="8QGWZ8333ZRAXWBG9CE9"'
-        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '8QGWZ8333ZRAXWBG9CE9'
+        $second | Should -Match '"key"="3G1K-HWJQ-TWUG-QAHW-8901"'
+        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
         Should -Invoke Import-ServerKeyRegFile -Times 1 -Exactly
     }
 
@@ -2063,7 +2080,8 @@ Describe 'United Offensive folder install' {
             '[HKEY_CURRENT_USER\Software\Call of Duty United Offensive]'
             '"key"="PUT-THE-KEY-HERE"')
         Mock Invoke-ResumableDownload {
-            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:nomergeKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*get=codkey*') { Copy-Item -LiteralPath $global:nomergeKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKeyPage -Destination $Destination -Force; return 0 }
             if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:nomergeSecond -Destination $Destination -Force; return 0 }
             if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:nomergeReg -Destination $Destination -Force; return 0 }
             Copy-Item -LiteralPath $global:nomergeGame -Destination $Destination -Force; return 0
@@ -2123,7 +2141,8 @@ Describe 'United Offensive folder install' {
             '[HKEY_CURRENT_USER\Software\Call of Duty United Offensive]'
             '"key"="PUT-THE-KEY-HERE"')
         Mock Invoke-ResumableDownload {
-            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:relookKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*get=codkey*') { Copy-Item -LiteralPath $global:relookKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKeyPage -Destination $Destination -Force; return 0 }
             if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:relookSecond -Destination $Destination -Force; return 0 }
             if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:relookReg -Destination $Destination -Force; return 0 }
             Copy-Item -LiteralPath $global:relookGame -Destination $Destination -Force; return 0
@@ -2163,7 +2182,8 @@ Describe 'United Offensive folder install' {
         $global:againKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
         Set-Content -LiteralPath $global:againKey -Value 'ABCD1234EFGH5678IJKL'
         Mock Invoke-ResumableDownload {
-            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:againKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*get=codkey*') { Copy-Item -LiteralPath $global:againKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKeyPage -Destination $Destination -Force; return 0 }
             if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:againSecondReg -Destination $Destination -Force; return 0 }
             if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:againReg -Destination $Destination -Force; return 0 }
             Copy-Item -LiteralPath $global:againGame -Destination $Destination -Force; return 0
@@ -2175,6 +2195,7 @@ Describe 'United Offensive folder install' {
         # runs the key setup again and downloads no game file at all.
         Remove-Item -LiteralPath (Join-Path $folder 'key') -Recurse -Force
         Mock Invoke-ResumableDownload {
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:uoKeyPage -Destination $Destination -Force; return 0 }
             if ($Url -like '*.zip') { throw 'The game must not be downloaded again.' }
             if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:againSecondReg -Destination $Destination -Force; return 0 }
             Copy-Item -LiteralPath $global:againReg -Destination $Destination -Force; return 0
@@ -2188,6 +2209,49 @@ Describe 'United Offensive folder install' {
         Test-Path -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') | Should -BeTrue
         # Two registry files now, and the first install added the same two.
         Should -Invoke Import-ServerKeyRegFile -Times 4 -Exactly
+    }
+    It 'reads the key the site prints for United Offensive, and only that one' {
+        $page = Join-Path $TestDrive ('page-' + [guid]::NewGuid().ToString('N') + '.html')
+        # The page lists both games' keys: the one after this game's name is the one taken.
+        Set-Content -LiteralPath $page -Value '<html><body>COD1  ABCD-1234-EFGH-5678-IJKL<br><b>CODUO</b>&nbsp;&nbsp;3G1K-HWJQ-TWUG-QAHW-8901<br></body></html>'
+        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
+        # One key on the page and no name to look for: it is the only key there can be.
+        Set-Content -LiteralPath $page -Value '<html><body>3G1K-HWJQ-TWUG-QAHW-8901</body></html>'
+        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
+        # Two keys and nothing that says which one is this game's: nothing is guessed.
+        Set-Content -LiteralPath $page -Value '<html><body>ABCD-1234-EFGH-5678-IJKL 3G1K-HWJQ-TWUG-QAHW-8901</body></html>'
+        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be ''
+    }
+
+    It 'deletes the registry values a key added when the key is removed' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-remove-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $keyDir = Join-Path $folder 'key'
+        $null = New-Item -ItemType Directory -Path $keyDir -Force
+        $copy = Join-Path $keyDir 'codhq-uo-server-key.reg'
+        Set-Content -LiteralPath $copy -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty United Offensive]'
+            '"key"="3G1K-HWJQ-TWUG-QAHW-8901"'
+            '"InstallPath"="C:\\Games\\CoDUO"'
+            '"Version"="1.51"')
+        $remove = Join-Path $keyDir 'codhq-uo-server-key-remove.reg'
+        Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $true } }
+        Mock Test-ServerKeyRegInRegistry { $true }
+        $spec = @{ Name = 'United Offensive 1.51'; RegUrl = 'https://example.test/coduo1.51.reg'; KeyPageUrl = 'https://example.test/downloads.php'
+            ValueName = 'key'; KeyFileName = 'coduo-key.txt'; CopyName = 'codhq-uo-server-key.reg'; Folder = 'key'
+            Version = '1.51'; DriveWithBackslash = $true }
+        Remove-ServerKeyReg -Spec $spec -GameFolder $folder | Should -BeTrue
+        # One question for the remove.reg, and the filled in file stays for the next setup.
+        Should -Invoke Import-ServerKeyRegFile -Times 1 -Exactly
+        Test-Path -LiteralPath $remove | Should -BeFalse
+        Test-Path -LiteralPath $copy | Should -BeTrue
+        # A prompt the player cancels keeps the remove.reg next to the filled in file.
+        Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 70; Output = 'The operation was canceled by the user.'; Prompted = $true; Cancelled = $true } }
+        Mock Write-Warn { }
+        Remove-ServerKeyReg -Spec $spec -GameFolder $folder | Should -BeFalse
+        Test-Path -LiteralPath $remove | Should -BeTrue
+        Should -Invoke Write-Warn -ParameterFilter { $Message -like '*was cancelled*' }
     }
 }
 Describe 'Server key registry read-back' {
@@ -2226,6 +2290,43 @@ Describe 'Server key registry read-back' {
             Set-ItemProperty -LiteralPath $wow -Name 'InstallDrive' -Value 'C:'
             Set-ItemProperty -LiteralPath $wow -Name 'Version' -Value '1.5'
             Test-ServerKeyRegInRegistry -Path $file | Should -BeTrue
+        } finally {
+            Remove-Item -LiteralPath $hive -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $wow -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'deletes only the values a filled in .reg file set, and reads that back' {
+        $section = 'CodebuffServerKeyRemoveTest_' + [guid]::NewGuid().ToString('N')
+        $hive = 'HKCU:\Software\' + $section
+        $wow = 'HKCU:\Software\Wow6432Node\' + $section
+        $file = Join-Path $TestDrive ('set-' + [guid]::NewGuid().ToString('N') + '.reg')
+        $cleanup = Join-Path $TestDrive ('remove-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $file -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            ('[HKEY_CURRENT_USER\Software\' + $section + ']')
+            '"key"="3G1K-HWJQ-TWUG-QAHW-8901"'
+            '"InstallPath"="C:\\Games\\CoDUO"')
+        try {
+            $null = New-Item -Path $hive -Force
+            Set-ItemProperty -LiteralPath $hive -Name 'key' -Value '3G1K-HWJQ-TWUG-QAHW-8901'
+            Set-ItemProperty -LiteralPath $hive -Name 'InstallPath' -Value 'C:\Games\CoDUO'
+            # Something the game itself keeps in that section is not the setup's to delete.
+            Set-ItemProperty -LiteralPath $hive -Name 'net_ads' -Value '1'
+            Test-ServerKeyRegInRegistry -Path $file | Should -BeTrue
+            $null = New-ServerKeyRegCleanupFile -Path $file -Destination $cleanup
+            $text = [IO.File]::ReadAllText($cleanup)
+            $text | Should -Match '"key"=-'
+            $text | Should -Match '"InstallPath"=-'
+            $text | Should -Not -Match 'net_ads'
+            # Nothing deleted yet: the values are still there.
+            Test-ServerKeyRegInRegistry -Path $cleanup | Should -BeFalse
+            $reg = Invoke-RegExe -Arguments @('import', $cleanup)
+            $reg.ExitCode | Should -Be 0
+            Test-ServerKeyRegInRegistry -Path $cleanup | Should -BeTrue
+            Test-ServerKeyRegInRegistry -Path $file | Should -BeFalse
+            (Get-ItemProperty -LiteralPath $hive).net_ads | Should -Be '1'
         } finally {
             Remove-Item -LiteralPath $hive -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $wow -Recurse -Force -ErrorAction SilentlyContinue

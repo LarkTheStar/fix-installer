@@ -2823,8 +2823,8 @@ function Get-GameCatalog {
             # The 1.5 game files, then the United Offensive 1.5 files over them, then the
             # two server keys: the client servers of this build have two safety systems,
             # and each one is a .reg file its own site publishes that writes the key into
-            # the registry. The first takes a key handed out per player, the second one key
-            # for everybody.
+            # the registry. Both take a key handed out per player: the first from the key file
+            # the site serves, the second from the page that prints it next to CODUO.
             Clients = @((New-CatalogClient -Id 'uo-15' -Name '1.5 (game and United Offensive)' -Source 'archive' -Extract $true -RequiredFiles @('CoDUOSP.exe', 'CoDUOMP.exe') -Description 'Downloads the 1.5 game and the United Offensive 1.5 files, copies them into the empty folder you picked, then sets up the two server keys the client''s servers ask for.' -Archives @(
                     @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.5.zip'; Size = 1236721212; Sha256 = 'a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb' },
                     @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 970702378; Sha256 = '09c84a605242fc96801dd018901af6ac09b59319bddecbd83fab7655a0a0c014' }) -ServerKey @(
@@ -2837,17 +2837,19 @@ function Get-GameCatalog {
                        # published file still says 1.1), the path ends in a backslash and the
                        # drive is the letter on its own.
                        Version = '1.5'; PathEndsWithBackslash = $true },
-                    # The second one: its own .reg file with one key that is the same for
-                    # every player, so there is no page to download it from.
+                    # The second one: its own .reg file, and the key the site prints on its
+                    # page next to this game's name (CODUO). The page hands out a new key on
+                    # every request, so each player gets one of their own.
                     @{ Name = 'United Offensive 1.51'
                        RegUrl = 'https://de.dvotx.org/dump/cod1/coduo1.51.reg'
-                       Key = '8QGWZ8333ZRAXWBG9CE9'
+                       KeyPageUrl = 'https://de.dvotx.org/dump/cod1/downloads.php'
+                       KeyLabel = 'CODUO'
                        ValueName = 'key'; KeyFileName = 'coduo-key.txt'; CopyName = 'codhq-uo-server-key.reg'; Folder = 'key'
                        # This one wants no trailing backslash in the path and the drive as a
                        # root, "D:\\" in the file (D:\ in the registry).
                        Version = '1.51'; DriveWithBackslash = $true })))
             Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoDUOSP.exe' -Clients @('uo-15')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoDUOMP.exe' -Clients @('uo-15')))
-            Note = 'Pick an empty folder with Change folder: Install copies the 1.5 game and the United Offensive 1.5 files into it, then sets up the two server keys the client''s servers ask for (both kept in key\). Set up server key does that again on its own, without downloading the game again. It is not looked for in Steam, and it is not installed over Call of Duty (2003).'
+            Note = 'Pick an empty folder with Change folder: Install copies the 1.5 game and the United Offensive 1.5 files into it, then sets up the two server keys the client''s servers ask for (both kept in key\). Set up server key does that again on its own, without downloading the game again. Remove takes the files, key\\ and the registry values the keys added away. It is not looked for in Steam, and it is not installed over Call of Duty (2003).'
             AllowEmptyFolder = $true; RequireEmptyFolder = $true
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
@@ -3561,6 +3563,36 @@ function Read-ServerKey {
     return $longest
 }
 
+# The key a client's site prints on its page, next to the game's own name: the site shows
+# "CODUO  3G1K-HWJQ-TWUG-QAHW-8901" and hands out a new key on every request, so every
+# player has one of their own and a key that stopped working can be replaced by running the
+# setup again. Only that line is read: the page is not kept and nothing else on it is used.
+# A page with one key and no name to look for is taken as it is; two keys and no name are
+# never guessed at.
+function Read-ServerKeyFromPage {
+    param([Parameter(Mandatory)][string]$Path, [string]$Label = '')
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $text = [IO.File]::ReadAllText($Path)
+    if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+    # The markup goes, so the name and the key after it are in the order they are read in.
+    $text = [regex]::Replace($text, '(?is)<(script|style)\b.*?</\1>', ' ')
+    $text = [regex]::Replace($text, '(?s)<[^>]*>', ' ')
+    $text = [regex]::Replace($text, '(?i)&nbsp;', ' ')
+    $text = $text.Replace('&amp;', '&')
+    # A key is 20 letters and digits in five groups of four, written with dashes.
+    $pattern = '(?<![0-9A-Za-z])[0-9A-Za-z]{4}(?:-[0-9A-Za-z]{4}){4}(?![0-9A-Za-z])'
+    if ($Label) {
+        $name = [regex]::Match($text, ('(?i)(?<![0-9A-Za-z])' + [regex]::Escape($Label) + '(?![0-9A-Za-z])'))
+        if ($name.Success) {
+            $after = [regex]::Match($text.Substring($name.Index + $name.Length), $pattern)
+            if ($after.Success) { return $after.Value.ToUpperInvariant() }
+        }
+    }
+    $all = [regex]::Matches($text, $pattern)
+    if ($all.Count -eq 1) { return $all[0].Value.ToUpperInvariant() }
+    return ''
+}
+
 # Gives one "name"="value" line of a .reg file a new value, keeping its indentation, its
 # quotes and the spacing around the '=' exactly as they were. A line the file leaves out is
 # added below the $AddAfter line (or at the end of the file), so every value the game reads
@@ -3643,29 +3675,51 @@ function Test-ServerKeyRegInRegistry {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     $wanted = [ordered]@{}
+    $absent = [ordered]@{}
     $section = ''
     foreach ($line in ([IO.File]::ReadAllText($Path) -split '\r?\n')) {
         if ($line -match '^[ \t]*\[([^\]]+)\][ \t]*$') {
             $name = [string]$Matches[1]
             $section = if ($name.StartsWith('-')) { '' } else { $name }
             if ($section -and -not $wanted.Contains($section)) { $wanted[$section] = [ordered]@{} }
+            if ($section -and -not $absent.Contains($section)) { $absent[$section] = [ordered]@{} }
             continue
         }
         if (-not $section) { continue }
+        # "name"=- is how a .reg file deletes one value, so a file carrying that line asks for
+        # the value to be gone: it is the file Remove hands to the registry editor.
+        if ($line -match '^[ \t]*"([^"]+)"[ \t]*=[ \t]*-[ \t]*$') {
+            $absent[$section][[string]$Matches[1]] = $true
+            continue
+        }
         if ($line -notmatch '^[ \t]*"([^"]+)"[ \t]*=[ \t]*"((?:[^"\\]|\\.)*)"') { continue }
         # A .reg string writes one backslash as two, and a quote as \": the registry holds
         # the text with both unescaped.
         $wanted[$section][[string]$Matches[1]] = ([string]$Matches[2] -replace '\\(.)', '$1')
     }
     $compared = 0
-    foreach ($name in @($wanted.Keys)) {
-        $values = $wanted[$name]
-        if ($values.Count -eq 0) { continue }
+    foreach ($name in @(@($wanted.Keys) + @($absent.Keys) | Select-Object -Unique)) {
+        $values = if ($wanted.Contains($name)) { $wanted[$name] } else { [ordered]@{} }
+        $gone = if ($absent.Contains($name)) { $absent[$name] } else { [ordered]@{} }
+        if ($values.Count -eq 0 -and $gone.Count -eq 0) { continue }
         $compared++
         $candidates = @(
             $name,
             ($name -replace '(?i)^(HKEY_[A-Z_]+\\Software\\)(?!Wow6432Node\\)', '$1Wow6432Node\'),
             ($name -replace '(?i)^(HKEY_[A-Z_]+\\Software\\)Wow6432Node\\', '$1'))
+        if ($values.Count -eq 0) {
+            # Only values to delete: every side of the 32-bit view has to be without them, or
+            # one of them still holds what Remove was meant to take away.
+            foreach ($candidate in $candidates) {
+                if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                foreach ($valueName in @($gone.Keys)) {
+                    $actual = $null
+                    try { $actual = [Microsoft.Win32.Registry]::GetValue($candidate, $valueName, $null) } catch { $actual = $null }
+                    if ($null -ne $actual) { return $false }
+                }
+            }
+            continue
+        }
         $found = $false
         foreach ($candidate in $candidates) {
             if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -3674,6 +3728,13 @@ function Test-ServerKeyRegInRegistry {
                 $actual = $null
                 try { $actual = [Microsoft.Win32.Registry]::GetValue($candidate, $valueName, $null) } catch { $actual = $null }
                 if ($null -eq $actual -or [string]$actual -ne [string]$values[$valueName]) { $same = $false; break }
+            }
+            if ($same) {
+                foreach ($valueName in @($gone.Keys)) {
+                    $actual = $null
+                    try { $actual = [Microsoft.Win32.Registry]::GetValue($candidate, $valueName, $null) } catch { $actual = $null }
+                    if ($null -ne $actual) { $same = $false; break }
+                }
             }
             if ($same) { $found = $true; break }
         }
@@ -3744,6 +3805,74 @@ function Import-ServerKeyRegFile {
     }
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = ''; Prompted = $false; Cancelled = $false }
 }
+# The .reg file that undoes a filled in one: the same sections, and every value the file sets
+# asked for to be deleted ("name"=- is how a .reg file deletes one value). Nothing else in
+# those sections is touched, so whatever the game or another program keeps there stays.
+function New-ServerKeyRegCleanupFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Destination)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('Windows Registry Editor Version 5.00')
+    $lines.Add('')
+    $section = ''
+    $current = ''
+    $seen = @{}
+    foreach ($line in ([IO.File]::ReadAllText($Path) -split '\r?\n')) {
+        if ($line -match '^[ \t]*\[([^\]]+)\][ \t]*$') {
+            $name = [string]$Matches[1]
+            # A section the file deletes outright ([-KEY]) is not one this setup wrote.
+            $section = if ($name.StartsWith('-')) { '' } else { $name }
+            continue
+        }
+        if (-not $section) { continue }
+        if ($line -notmatch '^[ \t]*"([^"]+)"[ \t]*=[ \t]*') { continue }
+        $valueName = [string]$Matches[1]
+        $mark = ($section + '|' + $valueName).ToLowerInvariant()
+        if ($seen.ContainsKey($mark)) { continue }
+        $seen[$mark] = $true
+        if ($section -ne $current) { $lines.Add('[' + $section + ']'); $lines.Add(''); $current = $section }
+        $lines.Add('"' + $valueName + '"=-')
+    }
+    if ($lines.Count -le 3) { return '' }
+    [IO.File]::WriteAllText($Destination, (($lines -join "`r`n") + "`r`n"), (New-Object System.Text.UnicodeEncoding($false, $true)))
+    return $Destination
+}
+
+# Deleting the values a filled in .reg file wrote, asked the same way they were added: the
+# registry editor shows the remove.reg and asks, and Windows asks for administrator rights
+# when the section needs them (the keys live in HKEY_LOCAL_MACHINE). True says the registry
+# no longer holds them; when it does, the remove.reg stays next to the filled in file so the
+# player can double-click it.
+function Remove-ServerKeyReg {
+    param([Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$GameFolder)
+    $keyDir = Get-ServerKeyFolder -Spec $Spec -GameFolder $GameFolder
+    $copyName = if ([string]::IsNullOrWhiteSpace([string]$Spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$Spec.CopyName }
+    $copy = Join-Path $keyDir $copyName
+    # Nothing was ever written into the registry for this game: nothing to take away.
+    if (-not (Test-Path -LiteralPath $copy -PathType Leaf)) { return $true }
+    $label = if ([string]::IsNullOrWhiteSpace([string]$Spec.Name)) { 'The server key' } else { [string]$Spec.Name }
+    $cleanup = Join-Path $keyDir ([IO.Path]::GetFileNameWithoutExtension($copyName) + '-remove.reg')
+    $built = New-ServerKeyRegCleanupFile -Path $copy -Destination $cleanup
+    if (-not $built) { return $true }
+    Write-Info "Removing the registry values $copyName added (the registry editor asks whether to delete them: click Yes)."
+    $removed = Import-ServerKeyRegFile -Path $cleanup
+    if ($removed.Cancelled) {
+        Write-Warn ("The administrator prompt for $copyName was cancelled, so the registry values of $label are still there. Double-click {0} and click Yes when Windows asks." -f $cleanup)
+        return $false
+    }
+    if ($removed.ExitCode -ne 0) {
+        Write-Warn ("The registry editor could not delete the values of $copyName ({0}). Double-click {1} to do it yourself." -f $removed.Output, $cleanup)
+        return $false
+    }
+    if (-not (Test-ServerKeyRegInRegistry -Path $cleanup)) {
+        Write-Warn ("The registry editor closed but the values of $copyName are still in the registry. Double-click {0} and click Yes (Windows may ask for administrator rights first)." -f $cleanup)
+        return $false
+    }
+    Remove-Item -LiteralPath $cleanup -Force -ErrorAction SilentlyContinue
+    Write-Ok "$label`: the registry values are removed."
+    return $true
+}
+
 # One registry file the client's servers ask for: the .reg is downloaded exactly as it is
 # published, the key and the game's path are written into its own lines, and the registry
 # editor adds it. A copy of the .reg stays in key\ whatever happens next, together with the
@@ -3754,8 +3883,10 @@ function Install-ServerKeyReg {
     $label = if ([string]::IsNullOrWhiteSpace([string]$Spec.Name)) { 'The server key' } else { [string]$Spec.Name }
     if ([string]::IsNullOrWhiteSpace([string]$Spec.RegUrl)) { throw "$label has no registry file to download." }
     $keyUrl = [string]$Spec.KeyUrl
+    $keyPageUrl = [string]$Spec.KeyPageUrl
+    $keyLabel = ([string]$Spec.KeyLabel).Trim()
     $literal = ([string]$Spec.Key).Trim()
-    if (-not $literal -and [string]::IsNullOrWhiteSpace($keyUrl)) { throw "$label has no key page to download from." }
+    if (-not $literal -and [string]::IsNullOrWhiteSpace($keyUrl) -and [string]::IsNullOrWhiteSpace($keyPageUrl)) { throw "$label has no key page to download from." }
     $valueName = if ([string]::IsNullOrWhiteSpace([string]$Spec.ValueName)) { 'codkey' } else { [string]$Spec.ValueName }
     $keyFileName = if ([string]::IsNullOrWhiteSpace([string]$Spec.KeyFileName)) { 'codkey.txt' } else { [string]$Spec.KeyFileName }
     $copyName = if ([string]::IsNullOrWhiteSpace([string]$Spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$Spec.CopyName }
@@ -3784,6 +3915,15 @@ function Install-ServerKeyReg {
             $key = $literal
             Set-Content -LiteralPath $keyPath -Value $key -Encoding ASCII
             Write-Ok "The server key is saved in $keyPath."
+        } elseif ($keyPageUrl) {
+            # The page the client's own site shows: it prints a new key for every request, so
+            # each player gets a key of their own. Only the line that names this game is read,
+            # the page itself is not kept, and nothing else on it is looked at.
+            Write-Info 'Reading the server key the site hands out ...'
+            $pagePath = Join-Path $stage 'server-key-page.html'
+            $null = Invoke-ResumableDownload -Url $keyPageUrl -Destination $pagePath -Label 'Reading the server key' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
+            $key = Read-ServerKeyFromPage -Path $pagePath -Label $keyLabel
+            if ($key) { Set-Content -LiteralPath $keyPath -Value $key -Encoding ASCII; Write-Ok "The server key is saved in $keyPath." }
         } else {
             Write-Info "Downloading the server key into $keyDir ..."
             $null = Invoke-ResumableDownload -Url $keyUrl -Destination $keyPath -Label 'Downloading the server key' -ExpectedSha256 '' -RetryDelaySeconds $RetryDelaySeconds
@@ -3796,7 +3936,7 @@ function Install-ServerKeyReg {
         Copy-Item -LiteralPath $regPath -Destination $copy -Force
         $null = Set-ServerKeyRegFile -Path $copy -Key $key -GameFolder $GameFolder -ValueName $valueName -Version $version -PathEndsWithBackslash:$pathEndsWithBackslash -DriveWithBackslash:$driveWithBackslash
         if (-not $key) {
-            Write-Warn "The file the site hands out for the key ($keyPath) does not hold a key that can be read. The registry file is ready in ${copy}: put the key into its $valueName line, save it and double-click it. The one as published is in $rawCopy."
+            Write-Warn "No key could be read from where the site hands it out, so $regName was not added. The registry file is ready in ${copy}: put the key into its $valueName line, save it and double-click it. The one as published is in $rawCopy."
             return $false
         }
         Write-Info "Writing the key, the path, the drive and the version into the registry: $regName"
@@ -4294,10 +4434,18 @@ function Remove-GameClient {
     # A launcher-type client's launcher added files of its own: everything new since
     # the install under its watched paths goes (after asking, for whole-game watches).
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
-    # The server key folder is part of what Install set up, so Remove takes it too.
+    # The server key folder is part of what Install set up, so Remove takes it too, and so do
+    # the registry values the .reg files added: the editor asks once per file, exactly as it
+    # did when they were added. A prompt that is cancelled keeps the folder with the
+    # remove.reg files, so it can be finished by hand.
     if ($client -and $client.ServerKey) {
-        $keyDir = Get-ServerKeyFolder -Spec (@($client.ServerKey) | Where-Object { $null -ne $_ } | Select-Object -First 1) -GameFolder $GameFolder
-        if (Test-Path -LiteralPath $keyDir -PathType Container) {
+        $specs = @(@($client.ServerKey) | Where-Object { $null -ne $_ })
+        $keyDir = Get-ServerKeyFolder -Spec ($specs | Select-Object -First 1) -GameFolder $GameFolder
+        $stillThere = 0
+        foreach ($spec in $specs) { if (-not (Remove-ServerKeyReg -Spec $spec -GameFolder $GameFolder)) { $stillThere++ } }
+        if ($stillThere -gt 0) {
+            Write-Warn "The registry values of $stillThere of $($specs.Count) server keys were not removed. Double-click the remove.reg file in ${keyDir} and click Yes to finish; the game files are removed all the same."
+        } elseif (Test-Path -LiteralPath $keyDir -PathType Container) {
             Remove-Item -LiteralPath $keyDir -Recurse -Force -ErrorAction SilentlyContinue
             Write-Info "Removed the server key folder: $keyDir"
         }

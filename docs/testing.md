@@ -69,7 +69,10 @@ file back. Removing 1.1 is the full revert.
 for in Steam, it is never written into the Call of Duty (2003) folder, and a folder that
 holds anything is refused before anything is downloaded. Install then copies the 1.5 game
 files in, the United Offensive 1.5 files over them, and sets up the two server keys from
-the client's site. Each key is its own `.reg` file, and each one opens the registry editor,
+the client's site. The first key comes from the site's key file, the second from the page
+that prints it next to `CODUO`: it is a new key on every request, so run **Set up server
+key** twice and `key\coduo-key.txt` must hold a different key each time. Each key is its own
+`.reg` file, and each one opens the registry editor,
 which asks whether to add it: click **Yes** (Windows asks for administrator rights first).
 After it closes the log must not say the values are still missing from the registry: that
 line means the merge did not happen (a No, or an editor that closed without asking), and
@@ -80,7 +83,9 @@ Check that `key\` ends up with both `.reg` files as published (`cod1.1_(x64).reg
 `"Version"="1.51"` in the second, and that the log says both keys are set
 up. **Set up server key** on the card must do the same again in a few seconds, without
 downloading the game. Then Play must start `CoDUOSP.exe` and `CoDUOMP.exe`, and Remove must
-take the files and `key\` away again. The keys come from the client's own site, so try the
+take the files, `key\` and the registry values the two `.reg` files added away again (the
+editor asks once per file, and a prompt that is cancelled leaves
+`key\codhq-*-remove.reg` to double-click). The keys come from the client's own site, so try the
 whole flow again if a download fails; when the page holds no key that can be read, the
 `.reg` is still in `key\` with its path, drive and version filled in, and the log says what
 to put in

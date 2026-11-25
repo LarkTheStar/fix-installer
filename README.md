@@ -176,8 +176,9 @@ empty: if it holds anything, Install says so and stops before downloading a byte
 then copies the 1.5 game files in, copies the United Offensive 1.5 files over them, and
 finally sets up the two server keys these client servers ask for. Each one is a `.reg` file
 the client's own site publishes that writes the key into the registry: `cod1.1_(x64).reg`
-takes a key the site hands out per player, and `coduo1.51.reg` takes one key that is the
-same for everybody. Install keeps both `.reg` files in `key\` exactly as they were
+takes a key the site hands out per player, and `coduo1.51.reg` takes the key the site prints
+on its own page next to `CODUO`, a new one for every request, so every player has a key of
+their own. Install keeps both `.reg` files in `key\` exactly as they were
 published, saves the keys next to them (`key\codkey.txt`, `key\coduo-key.txt`), fills in
 the key, the game's path, its drive and the game version (`"Version"="1.5"` and
 `"Version"="1.51"`, which the published files do not both name), and hands each file to the
@@ -187,8 +188,10 @@ editor asks whether to add it and asks Windows for administrator rights itself, 
 `key\codhq-uo-server-key.reg`, so a merge that was refused or cancelled can be finished by
 double-clicking them. When the editor closes, Install reads the values back out of the registry: if they are not there (a **No**, a refused administrator prompt, or an editor that closed without asking), the log says so and the setup runs again on the next Install. **Set up server key** on the card runs that setup again on its own,
 without downloading the game again. Play starts `CoDUOSP.exe` or `CoDUOMP.exe`, and
-**Remove** deletes what Install put there, `key\` included. Reinstalling goes through the
-same steps, so a folder it emptied again gets the keys again.
+**Remove** deletes what Install put there, `key\` included, and deletes the values the two
+`.reg` files added to the registry again, asking once per file the way it did when they were
+added (a cancelled prompt leaves `key\codhq-*-remove.reg` to double-click). Reinstalling goes
+through the same steps, so a folder it emptied again gets the keys again.
 
 **Black Ops 4 (Project BO4).** Install puts Shield's official launcher in the game
 folder, as its guide says, after backing up your `BlackOps4.exe` and `LPC` files. It
