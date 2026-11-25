@@ -105,7 +105,7 @@ From `game_config.cpp`:
 | Files that mark a valid folder | `CoDSP.exe`, `CoDMP.exe` | `CoDUOSP.exe`, `CoDUOMP.exe` | `CoD2SP_s.exe`, `CoD2MP_s.exe` |
 | Modes | `sp` (`CoDSP.exe`), `mp` (`CoDMP.exe`) | `sp` (`CoDUOSP.exe`), `mp` (`CoDUOMP.exe`) | `sp` (`CoD2SP_s.exe`), `mp` (`CoD2MP_s.exe`) |
 | Mode arguments | none | none | none |
-| Default arguments | `+set com_hunkmegs 512 +set r_lodbias -1000` | `+set com_hunkmegs 512 +set r_lodbias -1000` | none |
+| Default arguments | `+set com_hunkmegs 512 +set r_lodbias -1000` | none (see below) | none |
 | Name argument | `+set name` | `+set name` | `+set name` |
 | Game-content folder | `cod1_game_files` | `coduo_game_files` | `cod2_game_files` |
 | Redistributables | `vcr2005`, `dx_jun2010` | `vcr2005`, `dx_jun2010` | `vcr2005`, `dx_jun2010` |
@@ -116,6 +116,12 @@ From `game_config.cpp`:
 There are no launch flags (no equivalent of BO3's `-nointro`), no property overrides
 and no custom updater files for any of the three. `+set name` is the only player-name
 mechanism, and only the multiplayer executables take it.
+
+This utility passes the two Call of Duty (2003) memory settings on, but not to United
+Offensive: its executable answers `+set com_hunkmegs 512` with **"Out of memory error. You
+are probably low on hard disk space."** before the main menu, while the plain executable
+starts, so the launcher gives United Offensive no arguments at all and the game keeps the
+value in its own `uoconfig.cfg`.
 
 Singleplayer: CB has no client for any of these game's singleplayer executables, and
 none of the three games has a mode other than `sp` and `mp`.

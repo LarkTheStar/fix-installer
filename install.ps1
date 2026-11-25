@@ -2813,7 +2813,12 @@ function Get-GameCatalog {
         # (2003) folder, where its files would sit next to the 1.1 ones and clash with
         # them. Nothing is looked for in Steam: the folder is the one picked.
         [pscustomobject]@{ Id = 'coduo'; Name = 'Call of Duty: United Offensive'; Year = '2004'; SteamAppIds = @(); Detect = 'none'
-            ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = '+set com_hunkmegs 512 +set r_lodbias -1000'
+            # No memory settings on the command line. United Offensive answers
+            # "+set com_hunkmegs 512" with its own "Out of memory error. You are probably
+            # low on hard disk space." dialog before the main menu, while the plain
+            # executable starts; the game keeps its own value in uoconfig.cfg, so nothing
+            # is forced here.
+            ValidFiles = @('CoDUOSP.exe', 'CoDUOMP.exe'); NameArgument = '+set name'; DefaultArguments = ''
             NeedsElevation = $false; DpiFix = @('CoDUOSP.exe', 'CoDUOMP.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
             # The 1.5 game files, then the United Offensive 1.5 files over them, then the
             # two server keys: the client servers of this build have two safety systems,
@@ -3677,54 +3682,68 @@ function Test-ServerKeyRegInRegistry {
     return ($compared -gt 0)
 }
 
+# The registry editor's own program file. It is in the Windows folder (C:\Windows\
+# regedit.exe), not in System32: asking for System32\regedit.exe finds nothing on a normal
+# Windows install, which is exactly how the key setup once fell through to reg.exe, wrote
+# without asking and came back with reg.exe's own "ERROR: Error accessing the registry."
+# The Windows folder answers for 32-bit and 64-bit processes alike; Sysnative is the
+# 32-bit process's other way to the real file.
+function Get-RegeditPath {
+    foreach ($folder in @($env:SystemRoot, (Join-Path $env:SystemRoot 'Sysnative'), (Join-Path $env:SystemRoot 'System32'))) {
+        if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+        $candidate = Join-Path $folder 'regedit.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return ''
+}
+
 # Merging a .reg file, in a function of its own so the tests can run the whole key setup
 # without writing anything into the registry of the machine running them.
 #
 # The file is handed to the registry editor, not to reg.exe: the editor asks the player to
-# confirm the merge ("Adding information can unintentionally change or delete values...")
-# and asks Windows for administrator rights when the file writes a machine-wide key, which
-# is exactly what double-clicking it does. reg.exe writes without asking and is refused
-# when the utility itself is not running as administrator, which is what the first attempt
-# hit. Prompted says the registry editor did the asking, so a closed editor does not mean
-# the player said yes.
+# confirm the merge ("Adding information can unintentionally change or delete values..."),
+# which is the question the player expects and the same one double-clicking the file asks.
+# The editor is started as administrator because the key is machine-wide
+# (HKEY_LOCAL_MACHINE), so Windows asks for that permission first; reg.exe writes without
+# asking and is refused when the utility itself is not elevated, which is what the first
+# attempt hit. Prompted says the registry editor did the asking, and Cancelled says the
+# player said no to the administrator prompt.
 function Import-ServerKeyRegFile {
     param([Parameter(Mandatory)][string]$Path)
-    $regedit = Join-Path $env:SystemRoot 'System32\regedit.exe'
-    if (-not (Test-Path -LiteralPath $regedit -PathType Leaf)) {
-        # No registry editor to ask with: the silent import is all that is left.
-        $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
-        if (-not (Test-Path -LiteralPath $regExe -PathType Leaf)) { return [pscustomobject]@{ ExitCode = 1; Output = "$regedit and $regExe were not found."; Prompted = $false } }
-        $output = & $regExe import $Path 2>&1
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($output | Out-String).Trim()); Prompted = $false }
-    }
-    $process = $null
-    try {
-        # The file is handed to the shell, which starts it exactly as double-clicking it
-        # does: that is the way the registry editor is known to ask its question. Starting
-        # regedit.exe with the path is the fallback for a machine with no .reg handler.
-        $process = Start-Process -FilePath $Path -PassThru
-    } catch {
+    $regedit = Get-RegeditPath
+    if ($regedit) {
+        $process = $null
         try {
-            $process = Start-Process -FilePath $regedit -ArgumentList ('"' + $Path + '"') -PassThru
+            $process = Start-Process -FilePath $regedit -ArgumentList ('"' + $Path + '"') -Verb RunAs -PassThru
         } catch {
-            # The administrator prompt was refused (or the editor could not start).
-            return [pscustomobject]@{ ExitCode = 1; Output = $_.Exception.Message; Prompted = $true }
+            # A no at the administrator prompt ends here, and so does an editor that cannot
+            # start at all: both are reported, never turned into a silent reg.exe write.
+            return [pscustomobject]@{ ExitCode = 70; Output = $_.Exception.Message; Prompted = $true; Cancelled = [bool]($_.Exception.Message -match '(?i)cancel') }
         }
-    }
-    if ($null -ne $process) {
-        # The question is a window of its own. Bring the editor to the front once it has
-        # one, so it is not left behind the installer while the install waits for it.
-        for ($i = 0; $i -lt 20; $i++) {
-            try { $process.Refresh(); if ($process.HasExited -or $process.MainWindowHandle -ne [IntPtr]::Zero) { break } } catch { break }
-            Start-Sleep -Milliseconds 100
+        if ($null -ne $process) {
+            # The question is a window of its own. Bring the editor to the front once it
+            # has one, so it is not left behind the installer while the install waits.
+            for ($i = 0; $i -lt 20; $i++) {
+                try { $process.Refresh(); if ($process.HasExited -or $process.MainWindowHandle -ne [IntPtr]::Zero) { break } } catch { break }
+                Start-Sleep -Milliseconds 100
+            }
+            try { $null = [Microsoft.VisualBasic.Interaction]::AppActivate($process.Id) } catch { }
+            $process.WaitForExit()
         }
-        try { $null = [Microsoft.VisualBasic.Interaction]::AppActivate($process.Id) } catch { }
-        $process.WaitForExit()
+        $code = if ($null -ne $process) { $process.ExitCode } else { 0 }
+        return [pscustomobject]@{ ExitCode = $code; Output = ''; Prompted = $true; Cancelled = $false }
     }
-    $code = if ($null -ne $process) { $process.ExitCode } else { 0 }
-    return [pscustomobject]@{ ExitCode = $code; Output = ''; Prompted = $true }
+    # No registry editor on this machine: the import is all that is left, and it needs the
+    # same administrator rights.
+    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    if (-not (Test-Path -LiteralPath $regExe -PathType Leaf)) { return [pscustomobject]@{ ExitCode = 1; Output = 'The registry editor and reg.exe were not found.'; Prompted = $false; Cancelled = $false } }
+    try {
+        $process = Start-Process -FilePath $regExe -ArgumentList ('import "' + $Path + '"') -Verb RunAs -PassThru -Wait
+    } catch {
+        return [pscustomobject]@{ ExitCode = 70; Output = $_.Exception.Message; Prompted = $false; Cancelled = [bool]($_.Exception.Message -match '(?i)cancel') }
+    }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = ''; Prompted = $false; Cancelled = $false }
 }
-
 # One registry file the client's servers ask for: the .reg is downloaded exactly as it is
 # published, the key and the game's path are written into its own lines, and the registry
 # editor adds it. A copy of the .reg stays in key\ whatever happens next, together with the
@@ -3781,8 +3800,13 @@ function Install-ServerKeyReg {
             return $false
         }
         Write-Info "Writing the key, the path, the drive and the version into the registry: $regName"
-        Write-Info 'The registry editor opens and asks whether to add the key: click Yes (Windows may ask for administrator rights first).'
+        Write-Info 'Windows may ask for administrator rights first, then the registry editor asks whether to add the key: click Yes to both.'
         $imported = Import-ServerKeyRegFile -Path $copy
+        # A no at the administrator prompt is not a broken file: it is said plainly.
+        if ($imported.Cancelled) {
+            Write-Warn ("The administrator prompt for $regName was cancelled, so the key was not added. Double-click {0} and click Yes when Windows asks: everything else is installed." -f $copy)
+            return $false
+        }
         if ($imported.ExitCode -ne 0) {
             Write-Warn ("The registry editor could not add $regName ({0}). Double-click {1} to do it yourself: everything else is installed." -f $imported.Output, $copy)
             return $false

@@ -1896,6 +1896,9 @@ Describe 'United Offensive folder install' {
         $game.RequireEmptyFolder | Should -BeTrue
         @($game.Modes | ForEach-Object { $_.Exe }) | Should -Be @('CoDUOSP.exe', 'CoDUOMP.exe')
         @($game.Modes | ForEach-Object { $_.Label }) | Should -Be @('Singleplayer', 'Multiplayer')
+        # Nothing is put on the command line: United Offensive stops at its own "Out of
+        # memory error" dialog when it is handed the memory settings.
+        $game.DefaultArguments | Should -Be ''
     }
 
     It 'refuses a folder that is not empty before downloading anything' {
@@ -2079,6 +2082,28 @@ Describe 'United Offensive folder install' {
         Should -Invoke Import-ServerKeyRegFile -Times 2 -Exactly
     }
 
+    It 'says the key was not added when the administrator prompt is cancelled' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-cancel-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $reg = Join-Path $TestDrive ('cancel-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $reg -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty]'
+            '"codkey"="PUT-THE-KEY-HERE"')
+        Mock Invoke-ResumableDownload { Copy-Item -LiteralPath $reg -Destination $Destination -Force; return 0 }
+        Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 70; Output = 'The operation was canceled by the user.'; Prompted = $true; Cancelled = $true } }
+        Mock Test-ServerKeyRegInRegistry { $false }
+        Mock Write-Warn { }
+        $spec = @{ Name = 'Call of Duty 1.5'; RegUrl = 'https://example.test/cod1.1_(x64).reg'; Key = 'ABCD1234EFGH5678IJKL'
+            ValueName = 'codkey'; KeyFileName = 'codkey.txt'; CopyName = 'codhq-server-key.reg'; Folder = 'key'
+            Version = '1.5'; PathEndsWithBackslash = $true }
+        Install-ServerKeyReg -Spec $spec -GameFolder $folder -RetryDelaySeconds 0 | Should -BeFalse
+        Should -Invoke Import-ServerKeyRegFile -Times 1 -Exactly
+        # The player is told what happened, and the file stays where they can double-click it.
+        Should -Invoke Write-Warn -ParameterFilter { $Message -like '*was cancelled*' }
+        Test-Path -LiteralPath (Join-Path $folder 'key\codhq-server-key.reg') | Should -BeTrue
+    }
+
     It 'looks the registry up again on the next install of an installed client' {
         $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-relook-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
         $global:relookGame = Join-Path $TestDrive ('uo-game-' + [guid]::NewGuid().ToString('N') + '.zip')
@@ -2255,6 +2280,16 @@ Describe 'Plutonium and launching games' {
         (Get-CatalogLaunchCommand -Game $elevated -Mode (New-CatalogMode 'mp' 'Multiplayer' -Exe 'test.exe' -Elevate $true) -GameFolder 'C:\T').Elevate | Should -BeTrue
         $elevated.NeedsElevation = $true
         (Get-CatalogLaunchCommand -Game $elevated -Mode (New-CatalogMode 'mp' 'Multiplayer' -Exe 'test.exe') -GameFolder 'C:\T').Elevate | Should -BeTrue
+    }
+
+    It 'starts United Offensive with nothing the game refuses' {
+        $uo = Get-CatalogGame -Id 'coduo'
+        $sp = $uo.Modes | Where-Object { $_.Id -eq 'sp' }
+        # The executable on its own starts. "+set com_hunkmegs 512" makes the game show
+        # "Out of memory error. You are probably low on hard disk space." before the menu.
+        (Get-CatalogLaunchCommand -Game $uo -Mode $sp -GameFolder 'C:\UO').Arguments | Should -Be ''
+        $mp = $uo.Modes | Where-Object { $_.Id -eq 'mp' }
+        (Get-CatalogLaunchCommand -Game $uo -Mode $mp -GameFolder 'C:\UO' -PlayerName 'Lark').Arguments | Should -Be '+set name "Lark"'
     }
 
     It 'cleans the player name to what the clients accept' {
