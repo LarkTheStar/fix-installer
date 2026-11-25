@@ -1988,11 +1988,11 @@ Describe 'United Offensive folder install' {
         $reg | Should -Not -Match '"Version"="1\.1"'
         # The second key is the one the page printed next to CODUO.
         $second = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') -Raw
-        $second | Should -Match '"key"="3G1K-HWJQ-TWUG-QAHW-8901"'
+        $second | Should -Match '"key"="3G1KHWJQTWUGQAHW8901"'
         $second | Should -Match ('"InstallPath"="' + $escaped + '"')
         $second | Should -Match ('"InstallDrive"="' + $driveRoot + '"')
         $second | Should -Match '"Version"="1\.51"'
-        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
+        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '3G1KHWJQTWUGQAHW8901'
         # Both .reg files are also kept exactly as the site published them.
         Test-Path -LiteralPath (Join-Path $folder 'key\cod1.1_(x64).reg') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $folder 'key\coduo1.51.reg') | Should -BeTrue
@@ -2056,8 +2056,8 @@ Describe 'United Offensive folder install' {
         $copy | Should -Match '"Version"="1\.5"'
         # ...and the second key, which needs no download, is set up anyway.
         $second = Get-Content -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') -Raw
-        $second | Should -Match '"key"="3G1K-HWJQ-TWUG-QAHW-8901"'
-        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
+        $second | Should -Match '"key"="3G1KHWJQTWUGQAHW8901"'
+        Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '3G1KHWJQTWUGQAHW8901'
         Should -Invoke Import-ServerKeyRegFile -Times 1 -Exactly
     }
 
@@ -2213,11 +2213,13 @@ Describe 'United Offensive folder install' {
     It 'reads the key the site prints for United Offensive, and only that one' {
         $page = Join-Path $TestDrive ('page-' + [guid]::NewGuid().ToString('N') + '.html')
         # The page lists both games' keys: the one after this game's name is the one taken.
+        # It is printed in groups of four, and comes back as the 20 characters the registry
+        # value holds, without the dashes.
         Set-Content -LiteralPath $page -Value '<html><body>COD1  ABCD-1234-EFGH-5678-IJKL<br><b>CODUO</b>&nbsp;&nbsp;3G1K-HWJQ-TWUG-QAHW-8901<br></body></html>'
-        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
+        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be '3G1KHWJQTWUGQAHW8901'
         # One key on the page and no name to look for: it is the only key there can be.
         Set-Content -LiteralPath $page -Value '<html><body>3G1K-HWJQ-TWUG-QAHW-8901</body></html>'
-        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be '3G1K-HWJQ-TWUG-QAHW-8901'
+        Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be '3G1KHWJQTWUGQAHW8901'
         # Two keys and nothing that says which one is this game's: nothing is guessed.
         Set-Content -LiteralPath $page -Value '<html><body>ABCD-1234-EFGH-5678-IJKL 3G1K-HWJQ-TWUG-QAHW-8901</body></html>'
         Read-ServerKeyFromPage -Path $page -Label 'CODUO' | Should -Be ''

@@ -178,7 +178,8 @@ finally sets up the two server keys these client servers ask for. Each one is a 
 the client's own site publishes that writes the key into the registry: `cod1.1_(x64).reg`
 takes a key the site hands out per player, and `coduo1.51.reg` takes the key the site prints
 on its own page next to `CODUO`, a new one for every request, so every player has a key of
-their own. Install keeps both `.reg` files in `key\` exactly as they were
+their own (the page prints it in groups of four with dashes; the registry gets the same 20
+characters without them). Install keeps both `.reg` files in `key\` exactly as they were
 published, saves the keys next to them (`key\codkey.txt`, `key\coduo-key.txt`), fills in
 the key, the game's path, its drive and the game version (`"Version"="1.5"` and
 `"Version"="1.51"`, which the published files do not both name), and hands each file to the

@@ -3579,17 +3579,18 @@ function Read-ServerKeyFromPage {
     $text = [regex]::Replace($text, '(?s)<[^>]*>', ' ')
     $text = [regex]::Replace($text, '(?i)&nbsp;', ' ')
     $text = $text.Replace('&amp;', '&')
-    # A key is 20 letters and digits in five groups of four, written with dashes.
+    # A key is 20 letters and digits in five groups of four, written with dashes on the
+    # page. The registry value the game reads has the same 20 characters without them.
     $pattern = '(?<![0-9A-Za-z])[0-9A-Za-z]{4}(?:-[0-9A-Za-z]{4}){4}(?![0-9A-Za-z])'
     if ($Label) {
         $name = [regex]::Match($text, ('(?i)(?<![0-9A-Za-z])' + [regex]::Escape($Label) + '(?![0-9A-Za-z])'))
         if ($name.Success) {
             $after = [regex]::Match($text.Substring($name.Index + $name.Length), $pattern)
-            if ($after.Success) { return $after.Value.ToUpperInvariant() }
+            if ($after.Success) { return (($after.Value -replace '-', '').ToUpperInvariant()) }
         }
     }
     $all = [regex]::Matches($text, $pattern)
-    if ($all.Count -eq 1) { return $all[0].Value.ToUpperInvariant() }
+    if ($all.Count -eq 1) { return (($all[0].Value -replace '-', '').ToUpperInvariant()) }
     return ''
 }
 

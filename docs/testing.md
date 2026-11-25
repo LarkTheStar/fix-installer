@@ -71,7 +71,8 @@ holds anything is refused before anything is downloaded. Install then copies the
 files in, the United Offensive 1.5 files over them, and sets up the two server keys from
 the client's site. The first key comes from the site's key file, the second from the page
 that prints it next to `CODUO`: it is a new key on every request, so run **Set up server
-key** twice and `key\coduo-key.txt` must hold a different key each time. Each key is its own
+key** twice and `key\coduo-key.txt` must hold a different key each time, the 20 characters
+the registry gets, without the dashes the page groups them in. Each key is its own
 `.reg` file, and each one opens the registry editor,
 which asks whether to add it: click **Yes** (Windows asks for administrator rights first).
 After it closes the log must not say the values are still missing from the registry: that
