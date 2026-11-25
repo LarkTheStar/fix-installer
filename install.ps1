@@ -2822,7 +2822,7 @@ function Get-GameCatalog {
             # for everybody.
             Clients = @((New-CatalogClient -Id 'uo-15' -Name '1.5 (game and United Offensive)' -Source 'archive' -Extract $true -RequiredFiles @('CoDUOSP.exe', 'CoDUOMP.exe') -Description 'Downloads the 1.5 game and the United Offensive 1.5 files, copies them into the empty folder you picked, then sets up the two server keys the client''s servers ask for.' -Archives @(
                     @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.1.5.zip'; Size = 1236721212; Sha256 = 'a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb' },
-                    @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 973056769; Sha256 = '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2' }) -ServerKey @(
+                    @{ Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/Call.of.Duty.-.UO.1.5.zip'; Size = 970702378; Sha256 = '09c84a605242fc96801dd018901af6ac09b59319bddecbd83fab7655a0a0c014' }) -ServerKey @(
                     # The first safety system: a key the client's site hands out per player.
                     @{ Name = 'Call of Duty 1.5'
                        RegUrl = 'https://de.dvotx.org/dump/cod1/cod1.1_%28x64%29.reg'
@@ -3624,6 +3624,59 @@ function Set-ServerKeyRegFile {
     return $true
 }
 
+# What a filled in .reg file writes, read back out of the registry: the sections it names
+# and the string values in them. The game is 32-bit, so it reads HKCU\Software through the
+# Wow6432Node view: a section is looked for as the file spells it and on the other side of
+# that view, so the values are found whichever side wrote them. Nothing is printed: it only
+# answers whether the registry holds what the file says.
+#
+# The registry editor reports nothing back when it closes, so this is how the key setup
+# knows whether the merge happened: a player who clicked No, a refused administrator prompt
+# or an editor that closed without asking at all leaves the values out, and the setup says
+# so and leaves the file for the player to double-click.
+function Test-ServerKeyRegInRegistry {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $wanted = [ordered]@{}
+    $section = ''
+    foreach ($line in ([IO.File]::ReadAllText($Path) -split '\r?\n')) {
+        if ($line -match '^[ \t]*\[([^\]]+)\][ \t]*$') {
+            $name = [string]$Matches[1]
+            $section = if ($name.StartsWith('-')) { '' } else { $name }
+            if ($section -and -not $wanted.Contains($section)) { $wanted[$section] = [ordered]@{} }
+            continue
+        }
+        if (-not $section) { continue }
+        if ($line -notmatch '^[ \t]*"([^"]+)"[ \t]*=[ \t]*"((?:[^"\\]|\\.)*)"') { continue }
+        # A .reg string writes one backslash as two, and a quote as \": the registry holds
+        # the text with both unescaped.
+        $wanted[$section][[string]$Matches[1]] = ([string]$Matches[2] -replace '\\(.)', '$1')
+    }
+    $compared = 0
+    foreach ($name in @($wanted.Keys)) {
+        $values = $wanted[$name]
+        if ($values.Count -eq 0) { continue }
+        $compared++
+        $candidates = @(
+            $name,
+            ($name -replace '(?i)^(HKEY_[A-Z_]+\\Software\\)(?!Wow6432Node\\)', '$1Wow6432Node\'),
+            ($name -replace '(?i)^(HKEY_[A-Z_]+\\Software\\)Wow6432Node\\', '$1'))
+        $found = $false
+        foreach ($candidate in $candidates) {
+            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+            $same = $true
+            foreach ($valueName in @($values.Keys)) {
+                $actual = $null
+                try { $actual = [Microsoft.Win32.Registry]::GetValue($candidate, $valueName, $null) } catch { $actual = $null }
+                if ($null -eq $actual -or [string]$actual -ne [string]$values[$valueName]) { $same = $false; break }
+            }
+            if ($same) { $found = $true; break }
+        }
+        if (-not $found) { return $false }
+    }
+    return ($compared -gt 0)
+}
+
 # Merging a .reg file, in a function of its own so the tests can run the whole key setup
 # without writing anything into the registry of the machine running them.
 #
@@ -3644,13 +3697,30 @@ function Import-ServerKeyRegFile {
         $output = & $regExe import $Path 2>&1
         return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (($output | Out-String).Trim()); Prompted = $false }
     }
+    $process = $null
     try {
-        $process = Start-Process -FilePath $regedit -ArgumentList ('"' + $Path + '"') -PassThru
+        # The file is handed to the shell, which starts it exactly as double-clicking it
+        # does: that is the way the registry editor is known to ask its question. Starting
+        # regedit.exe with the path is the fallback for a machine with no .reg handler.
+        $process = Start-Process -FilePath $Path -PassThru
     } catch {
-        # The administrator prompt was refused (or the editor could not start).
-        return [pscustomobject]@{ ExitCode = 1; Output = $_.Exception.Message; Prompted = $true }
+        try {
+            $process = Start-Process -FilePath $regedit -ArgumentList ('"' + $Path + '"') -PassThru
+        } catch {
+            # The administrator prompt was refused (or the editor could not start).
+            return [pscustomobject]@{ ExitCode = 1; Output = $_.Exception.Message; Prompted = $true }
+        }
     }
-    if ($null -ne $process) { $process.WaitForExit() }
+    if ($null -ne $process) {
+        # The question is a window of its own. Bring the editor to the front once it has
+        # one, so it is not left behind the installer while the install waits for it.
+        for ($i = 0; $i -lt 20; $i++) {
+            try { $process.Refresh(); if ($process.HasExited -or $process.MainWindowHandle -ne [IntPtr]::Zero) { break } } catch { break }
+            Start-Sleep -Milliseconds 100
+        }
+        try { $null = [Microsoft.VisualBasic.Interaction]::AppActivate($process.Id) } catch { }
+        $process.WaitForExit()
+    }
     $code = if ($null -ne $process) { $process.ExitCode } else { 0 }
     return [pscustomobject]@{ ExitCode = $code; Output = ''; Prompted = $true }
 }
@@ -3717,7 +3787,13 @@ function Install-ServerKeyReg {
             Write-Warn ("The registry editor could not add $regName ({0}). Double-click {1} to do it yourself: everything else is installed." -f $imported.Output, $copy)
             return $false
         }
-        if ($imported.Prompted) { Write-Info "The registry editor has closed: the key is in the registry if you clicked Yes. If you clicked No, double-click $copy." }
+        # The editor says nothing when it closes, so the registry is what is asked: a No, a
+        # refused administrator prompt or an editor that never asked leaves the values out,
+        # and the player is told exactly which file to double-click.
+        if (-not (Test-ServerKeyRegInRegistry -Path $copy)) {
+            Write-Warn ("The registry editor closed but the values of $regName are not in the registry yet. Double-click {0} and click Yes (Windows may ask for administrator rights first): everything else is installed." -f $copy)
+            return $false
+        }
         Write-Ok "$label is set up for $GameFolder. The key and the registry file are also in $keyDir."
         return $true
     } finally {
@@ -3751,6 +3827,10 @@ function Test-ServerKeyInstalled {
         $copyName = if ([string]::IsNullOrWhiteSpace([string]$spec.CopyName)) { 'codhq-server-key.reg' } else { [string]$spec.CopyName }
         $keyFileName = if ([string]::IsNullOrWhiteSpace([string]$spec.KeyFileName)) { 'codkey.txt' } else { [string]$spec.KeyFileName }
         foreach ($name in @($copyName, $keyFileName)) { if (-not (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf)) { return $false } }
+        # Files alone do not say the key is set up: the registry has to hold the values the
+        # copy writes. When it does not (a closed editor, a No), Install runs the setup again
+        # without downloading the game again.
+        if (-not (Test-ServerKeyRegInRegistry -Path (Join-Path $dir $copyName))) { return $false }
         # A copy that names another game version was written by an older setup (or by the
         # published file's own 1.1): it is written again, so the registry gets the values the
         # installed game reads.

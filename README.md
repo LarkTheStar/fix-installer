@@ -185,7 +185,7 @@ registry editor. The
 editor asks whether to add it and asks Windows for administrator rights itself, so click
 **Yes** on both. The filled in copies stay as `key\codhq-server-key.reg` and
 `key\codhq-uo-server-key.reg`, so a merge that was refused or cancelled can be finished by
-double-clicking them. **Set up server key** on the card runs that setup again on its own,
+double-clicking them. When the editor closes, Install reads the values back out of the registry: if they are not there (a **No**, a refused administrator prompt, or an editor that closed without asking), the log says so and the setup runs again on the next Install. **Set up server key** on the card runs that setup again on its own,
 without downloading the game again. Play starts `CoDUOSP.exe` or `CoDUOMP.exe`, and
 **Remove** deletes what Install put there, `key\` included. Reinstalling goes through the
 same steps, so a folder it emptied again gets the keys again.

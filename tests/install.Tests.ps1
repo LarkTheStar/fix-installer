@@ -1873,7 +1873,7 @@ Describe 'United Offensive folder install' {
         $client.Extract | Should -BeTrue
         $client.Source | Should -Be 'archive'
         @($client.Archives | ForEach-Object { [IO.Path]::GetFileName(([uri]$_.Url).AbsolutePath) }) | Should -Be @('Call.of.Duty.1.5.zip', 'Call.of.Duty.-.UO.1.5.zip')
-        @($client.Archives | ForEach-Object { $_.Sha256 }) | Should -Be @('a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb', '122ba7e8ba787925e7fd1181e74b8fa811fd977fef184bc3de081d8af3c8a3c2')
+        @($client.Archives | ForEach-Object { $_.Sha256 }) | Should -Be @('a2f94fa95394d64fee4abb527d3d2e2ad7bfc680b2ee335bc22f6e55666d08cb', '09c84a605242fc96801dd018901af6ac09b59319bddecbd83fab7655a0a0c014')
         # The two safety systems of the client's servers: their own .reg each, and the key
         # each one takes.
         @($client.ServerKey).Count | Should -Be 2
@@ -1941,6 +1941,7 @@ Describe 'United Offensive folder install' {
             Copy-Item -LiteralPath $global:uoGame -Destination $Destination -Force; return 0
         }
         Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $false } }
+        Mock Test-ServerKeyRegInRegistry { $true }
         $result = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
         $result.KeyInstalled | Should -BeTrue
         # The United Offensive archive is copied over the 1.5 game's own files.
@@ -2018,6 +2019,7 @@ Describe 'United Offensive folder install' {
             Copy-Item -LiteralPath $global:badGame -Destination $Destination -Force; return 0
         }
         Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $false } }
+        Mock Test-ServerKeyRegInRegistry { $true }
         $result = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
         # The game files are installed all the same.
         Get-Text (Join-Path $folder 'CoDUOSP.exe') | Should -Be 'sp'
@@ -2037,6 +2039,84 @@ Describe 'United Offensive folder install' {
         $second | Should -Match '"key"="8QGWZ8333ZRAXWBG9CE9"'
         Get-Text (Join-Path $folder 'key\coduo-key.txt') | Should -Be '8QGWZ8333ZRAXWBG9CE9'
         Should -Invoke Import-ServerKeyRegFile -Times 1 -Exactly
+    }
+
+    It 'does not report the key as set up when the registry did not take the values' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-nomerge-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $global:nomergeGame = Join-Path $TestDrive ('uo-game-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:nomergeGame -Entries ([ordered]@{ 'CoDUOSP.exe' = 'sp'; 'CoDUOMP.exe' = 'mp' })
+        $global:nomergeKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $global:nomergeKey -Value 'ABCD1234EFGH5678IJKL'
+        $global:nomergeReg = Join-Path $TestDrive ('server-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $global:nomergeReg -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty]'
+            '"codkey"="PUT-THE-KEY-HERE"')
+        $global:nomergeSecond = Join-Path $TestDrive ('server-uo-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $global:nomergeSecond -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty United Offensive]'
+            '"key"="PUT-THE-KEY-HERE"')
+        Mock Invoke-ResumableDownload {
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:nomergeKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:nomergeSecond -Destination $Destination -Force; return 0 }
+            if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:nomergeReg -Destination $Destination -Force; return 0 }
+            Copy-Item -LiteralPath $global:nomergeGame -Destination $Destination -Force; return 0
+        }
+        Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $true } }
+        # The editor closed without the values reaching the registry: the player clicked No,
+        # or the question never came up.
+        Mock Test-ServerKeyRegInRegistry { $false }
+        $result = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
+        $result.KeyInstalled | Should -BeFalse
+        # The game files are installed and both files are in key\ for the player to
+        # double-click.
+        Get-Text (Join-Path $folder 'CoDUOSP.exe') | Should -Be 'sp'
+        Test-Path -LiteralPath (Join-Path $folder 'key\codhq-server-key.reg') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') | Should -BeTrue
+        Should -Invoke Import-ServerKeyRegFile -Times 2 -Exactly
+    }
+
+    It 'looks the registry up again on the next install of an installed client' {
+        $folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('uo-relook-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        $global:relookGame = Join-Path $TestDrive ('uo-game-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:relookGame -Entries ([ordered]@{ 'CoDUOSP.exe' = 'sp'; 'CoDUOMP.exe' = 'mp' })
+        $global:relookKey = Join-Path $TestDrive ('codkey-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $global:relookKey -Value 'ABCD1234EFGH5678IJKL'
+        $global:relookReg = Join-Path $TestDrive ('server-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $global:relookReg -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty]'
+            '"codkey"="PUT-THE-KEY-HERE"')
+        $global:relookSecond = Join-Path $TestDrive ('server-uo-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $global:relookSecond -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            '[HKEY_CURRENT_USER\Software\Call of Duty United Offensive]'
+            '"key"="PUT-THE-KEY-HERE"')
+        Mock Invoke-ResumableDownload {
+            if ($Url -like '*downloads.php*') { Copy-Item -LiteralPath $global:relookKey -Destination $Destination -Force; return 0 }
+            if ($Url -like '*coduo1.51.reg') { Copy-Item -LiteralPath $global:relookSecond -Destination $Destination -Force; return 0 }
+            if ($Url -like '*.reg') { Copy-Item -LiteralPath $global:relookReg -Destination $Destination -Force; return 0 }
+            Copy-Item -LiteralPath $global:relookGame -Destination $Destination -Force; return 0
+        }
+        Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $false } }
+        Mock Test-ServerKeyRegInRegistry { $true }
+        $null = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
+        # Everything is in key\ and in the registry: Install has nothing to do.
+        $again = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
+        $again.Downloaded | Should -Be 0
+        $again.KeyInstalled | Should -BeFalse
+        Should -Invoke Import-ServerKeyRegFile -Times 2 -Exactly
+        # key\ goes missing: the setup runs again.
+        Remove-Item -LiteralPath (Join-Path $folder 'key') -Recurse -Force
+        $third = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
+        $third.Downloaded | Should -Be 0
+        $third.KeyInstalled | Should -BeTrue
+        Should -Invoke Import-ServerKeyRegFile -Times 4 -Exactly
     }
 
     It 'sets the keys up again without downloading the game again' {
@@ -2064,6 +2144,7 @@ Describe 'United Offensive folder install' {
             Copy-Item -LiteralPath $global:againGame -Destination $Destination -Force; return 0
         }
         Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $false } }
+        Mock Test-ServerKeyRegInRegistry { $true }
         $null = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
         # Someone deleted key\, or the first attempt at the registry files failed: Install
         # runs the key setup again and downloads no game file at all.
@@ -2074,6 +2155,7 @@ Describe 'United Offensive folder install' {
             Copy-Item -LiteralPath $global:againReg -Destination $Destination -Force; return 0
         }
         Mock Import-ServerKeyRegFile { [pscustomobject]@{ ExitCode = 0; Output = ''; Prompted = $false } }
+        Mock Test-ServerKeyRegInRegistry { $true }
         $result = Install-GameClient -GameId 'coduo' -ClientId 'uo-15' -GameFolder $folder -RetryDelaySeconds 0
         $result.Downloaded | Should -Be 0
         $result.KeyInstalled | Should -BeTrue
@@ -2081,6 +2163,48 @@ Describe 'United Offensive folder install' {
         Test-Path -LiteralPath (Join-Path $folder 'key\codhq-uo-server-key.reg') | Should -BeTrue
         # Two registry files now, and the first install added the same two.
         Should -Invoke Import-ServerKeyRegFile -Times 4 -Exactly
+    }
+}
+Describe 'Server key registry read-back' {
+    It 'asks the registry whether a filled in .reg file is in it' {
+        $section = 'CodebuffServerKeyTest_' + [guid]::NewGuid().ToString('N')
+        $hive = 'HKCU:\Software\' + $section
+        $wow = 'HKCU:\Software\Wow6432Node\' + $section
+        $file = Join-Path $TestDrive ('check-' + [guid]::NewGuid().ToString('N') + '.reg')
+        Set-Content -LiteralPath $file -Value @(
+            'Windows Registry Editor Version 5.00'
+            ''
+            ('[HKEY_CURRENT_USER\Software\' + $section + ']')
+            '"codkey"="ABCD"'
+            '"InstallPath"="C:\\Games\\Test"'
+            '"InstallDrive"="C:"'
+            '"Version"="1.5"')
+        try {
+            # Nothing written yet: the editor closed without merging the file.
+            Test-ServerKeyRegInRegistry -Path $file | Should -BeFalse
+            $null = New-Item -Path $hive -Force
+            Set-ItemProperty -LiteralPath $hive -Name 'codkey' -Value 'ABCD'
+            Set-ItemProperty -LiteralPath $hive -Name 'InstallPath' -Value 'C:\Games\Test'
+            Set-ItemProperty -LiteralPath $hive -Name 'InstallDrive' -Value 'C:'
+            Set-ItemProperty -LiteralPath $hive -Name 'Version' -Value '1.5'
+            # The merge happened: every value the file writes is there, with the doubled
+            # backslash of the .reg line read as the single one the registry holds.
+            Test-ServerKeyRegInRegistry -Path $file | Should -BeTrue
+            # One value differs (an older file was merged): not set up.
+            Set-ItemProperty -LiteralPath $hive -Name 'Version' -Value '1.1'
+            Test-ServerKeyRegInRegistry -Path $file | Should -BeFalse
+            # The 32-bit view of the same section is what the game reads, so it counts.
+            Remove-Item -LiteralPath $hive -Recurse -Force
+            $null = New-Item -Path $wow -Force
+            Set-ItemProperty -LiteralPath $wow -Name 'codkey' -Value 'ABCD'
+            Set-ItemProperty -LiteralPath $wow -Name 'InstallPath' -Value 'C:\Games\Test'
+            Set-ItemProperty -LiteralPath $wow -Name 'InstallDrive' -Value 'C:'
+            Set-ItemProperty -LiteralPath $wow -Name 'Version' -Value '1.5'
+            Test-ServerKeyRegInRegistry -Path $file | Should -BeTrue
+        } finally {
+            Remove-Item -LiteralPath $hive -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $wow -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 Describe 'Plutonium and launching games' {

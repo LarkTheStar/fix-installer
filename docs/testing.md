@@ -71,6 +71,9 @@ holds anything is refused before anything is downloaded. Install then copies the
 files in, the United Offensive 1.5 files over them, and sets up the two server keys from
 the client's site. Each key is its own `.reg` file, and each one opens the registry editor,
 which asks whether to add it: click **Yes** (Windows asks for administrator rights first).
+After it closes the log must not say the values are still missing from the registry: that
+line means the merge did not happen (a No, or an editor that closed without asking), and
+**Set up server key** must ask again.
 Check that `key\` ends up with both `.reg` files as published (`cod1.1_(x64).reg`,
 `coduo1.51.reg`), both keys (`codkey.txt`, `coduo-key.txt`), the filled in copies
 (`codhq-server-key.reg`, `codhq-uo-server-key.reg`) with `"Version"="1.5"` in the first and
