@@ -116,7 +116,7 @@ and installs the community client that brings it back online:
 | --- | --- |
 | 1.1 singleplayer and multiplayer files, then 1.1X on top of it (this project's release) | Call of Duty (2003) |
 | 1.5 game files, United Offensive 1.5 over them, and its two server keys (this project's release and the client's own site) | United Offensive |
-| Nothing yet: the card only finds the game | Call of Duty 2 |
+| Custom patch v2, then CoD2x on top of it (the patch's own ZIP and the CoD2x release) | Call of Duty 2 |
 | Plutonium | World at War, Black Ops, Black Ops II (MP, Zombies), MW3 (MP) |
 | IW4x, AlterWare | MW2 (MP; campaign and Spec Ops), MW3 (campaign, Spec Ops) |
 | iw3x or CoD4x, IW3SP-Mod | CoD4 (MP; campaign) |

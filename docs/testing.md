@@ -90,8 +90,7 @@ editor asks once per file, and a prompt that is cancelled leaves
 whole flow again if a download fails; when the page holds no key that can be read, the
 `.reg` is still in `key\` with its path, drive and version filled in, and the log says what
 to put in
-it by hand. **Call of Duty 2** only finds the game for now: there is no client to install
-yet, so checking the card says **Game found** with the right folder is all it can do.
+it by hand. **Call of Duty 2** installs two patches. **Install Custom patch v2** copies only `steam.dll` and `cod2patch.ini` out of the ZIP's `steam` folder (the `retail` folder and `Info.txt` stay in it), then **Install CoD2x** copies `mss32.dll` and `mss32_original.dll` in. Play must start `CoD2SP_s.exe` and `CoD2MP_s.exe`, and Remove must take CoD2x away first, put the retail `mss32.dll` back and then delete the patch's two files.
 
 ## When something fails
 

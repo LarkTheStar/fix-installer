@@ -2186,7 +2186,11 @@ function Expand-ZipOverwrite {
         [string]$BackupDirectory = '',
         # Folder the archive wraps all its entries in (for example "Call of Duty\"), left
         # out of the paths that are written.
-        [string]$StripPrefix = ''
+        [string]$StripPrefix = '',
+        # Entries to take out of the archive and where each one goes, as From/To pairs
+        # (a patch ZIP also holds files for another build of the game). Empty: every
+        # entry of the archive is written.
+        [object[]]$Items = @()
     )
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -2196,6 +2200,13 @@ function Expand-ZipOverwrite {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
         $stripPrefix = ($StripPrefix -replace '/', '\').TrimEnd('\')
+        $wanted = @{}
+        foreach ($pick in @($Items)) {
+            $from = (([string]$pick.From) -replace '/', '\').Trim('\')
+            $to = (([string]$pick.To) -replace '/', '\').Trim('\')
+            if ([string]::IsNullOrWhiteSpace($from) -or [string]::IsNullOrWhiteSpace($to)) { Stop-Installer 'An archive item is missing the path it is taken from or put at.' }
+            $wanted[$from.ToLowerInvariant()] = $to
+        }
         $planned = [System.Collections.Generic.List[object]]::new()
         foreach ($entry in $zip.Entries) {
             $entryPath = $entry.FullName -replace '/', '\'
@@ -2205,6 +2216,13 @@ function Expand-ZipOverwrite {
                 if ($trimmed -ieq $stripPrefix) { continue }
                 if (-not $trimmed.StartsWith($stripPrefix + '\', [StringComparison]::OrdinalIgnoreCase)) { Stop-Installer "ZIP entry is not inside the archive's root folder: $($entry.FullName)" }
                 $entryPath = $trimmed.Substring($stripPrefix.Length + 1)
+            }
+            # Only the entries the client asked for are written, each at the path it is
+            # given: everything else in the ZIP stays in it.
+            if ($wanted.Count -gt 0) {
+                $itemKey = ($entryPath.TrimEnd('\')).ToLowerInvariant()
+                if (-not $wanted.ContainsKey($itemKey)) { continue }
+                $entryPath = $wanted[$itemKey]
             }
             $isDirectory = [string]::IsNullOrEmpty($entry.Name)
             $relative = (Get-ValidatedRelativePath $entryPath).TrimEnd('\')
@@ -2717,6 +2735,9 @@ function New-CatalogClient {
         # United Offensive 1.5 files). They are the game's own layout and are not opened
         # to look for a wrapper folder.
         [object[]]$Archives = @(),
+        # Only these entries of the archive are installed, each at its own path in the game
+        # folder, as From/To pairs; the rest of the ZIP is left in it.
+        [object[]]$ArchiveItems = @(),
         # The registry files the client's own servers ask for, each with the key that goes
         # in it: the .reg its site publishes, the page that hands a personal key out (or
         # one key for everybody), and the name the file uses for the key. Install fills the
@@ -2728,7 +2749,8 @@ function New-CatalogClient {
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
         Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
-        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ServerKey = @(@($ServerKey) | Where-Object { $null -ne $_ }) }
+        CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ArchiveItems = @($ArchiveItems)
+        ServerKey = @(@($ServerKey) | Where-Object { $null -ne $_ }) }
 }
 
 function New-CatalogMode {
@@ -2807,8 +2829,6 @@ function Get-GameCatalog {
             # the player picks or creates is enough: Install writes the game files there.
             AllowEmptyFolder = $true
             Available = $true; UnavailableReason = '' }
-        # United Offensive and Call of Duty 2: cards only for now. They find the game and
-        # list it; a client can be added when there is one to place.
         # United Offensive is installed where the player says, not into the Call of Duty
         # (2003) folder, where its files would sit next to the 1.1 ones and clash with
         # them. Nothing is looked for in Steam: the folder is the one picked.
@@ -2855,8 +2875,22 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'cod2'; Name = 'Call of Duty 2'; Year = '2005'; SteamAppIds = @(2630); Detect = 'steam'
             ValidFiles = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); NameArgument = '+set name'; DefaultArguments = ''
             NeedsElevation = $true; DpiFix = @('CoD2SP_s.exe', 'CoD2MP_s.exe'); CdKey = ''; PlutoniumKey = ''; ExeCheck = $null; ProjectUrl = ''
-            Clients = @(); Modes = @()
-            Note = 'No client to install yet: the card finds the game and nothing else for now.'
+            # Two community patches go on top of the Steam game (1.3), in this order. The
+            # custom patch v2's ZIP also holds a retail folder and Info.txt; only the two
+            # items in its steam folder are the game's, so the ZIP is read for those and
+            # nothing else. CoD2x replaces the Miles library and keeps the retail one next
+            # to it as mss32_original.dll; its manual stays in the ZIP.
+            Clients = @(
+                (New-CatalogClient -Id 'cod2-v2' -Name 'Custom patch v2' -Source 'archive' -Extract $true -RequiredFiles @('steam.dll', 'cod2patch.ini') -ArchiveItems @(@{ From = 'steam/steam.dll'; To = 'steam.dll' }, @{ From = 'steam/cod2patch.ini'; To = 'cod2patch.ini' }) -Description 'Takes steam.dll and cod2patch.ini out of the patch''s steam folder and copies them into the game folder; the retail folder and Info.txt stay in the ZIP.' -Archive @{
+                    Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD2_CustomPatchv2.zip'
+                    Size = 108810
+                    Sha256 = '6afdb9ce6072ffbbe682282a13026bc72012331f0dafde1bc62a37b2cbc96ddd' }),
+                (New-CatalogClient -Id 'cod2x' -Name 'CoD2x' -Source 'archive' -Extract $true -Requires @('cod2-v2') -RequiredFiles @('mss32.dll', 'mss32_original.dll') -ArchiveItems @(@{ From = 'mss32.dll'; To = 'mss32.dll' }, @{ From = 'mss32_original.dll'; To = 'mss32_original.dll' }) -Description 'Copies CoD2x''s mss32.dll and mss32_original.dll into the game folder; the manual in the ZIP is not needed.' -Archive @{
+                    Url = 'https://github.com/callofduty2x/CoD2x/releases/download/v1.4.6.8/CoD2x_1.4.6.8_windows.zip'
+                    Size = 2577745
+                    Sha256 = 'c33f52037e67eaa948746a93967d27d8c70ab58623abab48d07803600a6a8555' }))
+            Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoD2SP_s.exe' -Clients @('cod2x')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoD2MP_s.exe' -Clients @('cod2x')))
+            Note = 'Custom patch v2 first, then CoD2x on top of it: both copy only their own files into the game folder. Remove takes CoD2x away first, puts your own mss32.dll back, then takes the patch''s two files away.'
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod4'; Name = 'Call of Duty 4: Modern Warfare'; Year = '2007'; SteamAppIds = @(7940); Detect = 'steam'
             ValidFiles = @('binkw32.dll', 'iw3mp.exe', 'iw3sp.exe'); NameArgument = '+set name'; DefaultArguments = ''
@@ -4079,7 +4113,7 @@ function Install-GameClientArchive {
                 $first = $false
             }
             Write-Info "Copying $label into $GameFolder ..."
-            Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $runBackup -StripPrefix $root
+            Expand-ZipOverwrite -ZipPath $zipPath -DestinationPath $GameFolder -Journal $journal -BackupDirectory $runBackup -StripPrefix $root -Items @($Client.ArchiveItems)
             # The next archive of the same client only needs the download stage free.
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
         }

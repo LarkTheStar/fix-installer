@@ -1284,9 +1284,10 @@ Describe 'Game catalogue' {
             @($game.ValidFiles | Where-Object { $_ -like '*.exe' }).Count | Should -Be 2 -Because $id
             $game.Note | Should -Not -BeNullOrEmpty -Because $id
         }
-        # Call of Duty 2 still has nothing to install.
-        @((Get-CatalogGame -Id 'cod2').Clients).Count | Should -Be 0
-        @((Get-CatalogGame -Id 'cod2').Modes).Count | Should -Be 0
+        # Call of Duty 2 has its two community patches, and a mode for each executable.
+        $cod2 = Get-CatalogGame -Id 'cod2'
+        @($cod2.Clients | ForEach-Object { $_.Id }) | Should -Be @('cod2-v2', 'cod2x')
+        @($cod2.Modes | ForEach-Object { $_.Exe }) | Should -Be @('CoD2SP_s.exe', 'CoD2MP_s.exe')
         # United Offensive is not looked for in Steam at all: it goes where the player
         # picks. Call of Duty 2 is still found through Steam.
         @((Get-CatalogGame -Id 'coduo').SteamAppIds).Count | Should -Be 0
@@ -1829,6 +1830,108 @@ Describe 'Call of Duty 1.1 archive client' {
         { Install-GameClientArchive -Game (Get-CatalogGame -Id 'cod1') -Client $wrong -GameFolder $cod1Folder -RetryDelaySeconds 0 } | Should -Throw '*did not put CoDMP.exe*'
         Get-Text (Join-Path $cod1Folder 'CoDMP.exe') | Should -Be '1.1 mp'
         Test-Path -LiteralPath (Join-Path $cod1Folder 'cod1x.dll') | Should -BeFalse
+    }
+}
+
+Describe 'Call of Duty 2 patches' {
+    BeforeEach {
+        $cod2Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod2-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $cod2Folder 'CoD2SP_s.exe') -Value 'retail sp'
+        Set-Content -LiteralPath (Join-Path $cod2Folder 'CoD2MP_s.exe') -Value 'retail mp'
+        Set-Content -LiteralPath (Join-Path $cod2Folder 'mss32.dll') -Value 'retail miles'
+        # The custom patch's ZIP: its steam folder is the one this build uses. The retail
+        # folder and Info.txt belong to another build and must stay in the ZIP.
+        $global:cod2PatchZip = Join-Path $TestDrive ('cod2-v2-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod2PatchZip -Entries ([ordered]@{
+            'CoD2_CustomPatchv2/Info.txt' = 'info'
+            'CoD2_CustomPatchv2/retail/cod2patch.ini' = 'retail ini'
+            'CoD2_CustomPatchv2/retail/winmm.dll' = 'retail dll'
+            'CoD2_CustomPatchv2/steam/cod2patch.ini' = 'steam ini'
+            'CoD2_CustomPatchv2/steam/steam.dll' = 'steam dll' })
+        $global:cod2xZip = Join-Path $TestDrive ('cod2x-' + [guid]::NewGuid().ToString('N') + '.zip')
+        New-TestZip -Path $global:cod2xZip -Entries ([ordered]@{
+            'CoD2x Installation and uninstallation manual.txt' = 'manual'
+            'mss32.dll' = 'cod2x miles'
+            'mss32_original.dll' = 'retail miles' })
+        Mock Invoke-ResumableDownload {
+            if ($Url -like '*CoD2x*') { Copy-Item -LiteralPath $global:cod2xZip -Destination $Destination -Force; return 0 }
+            Copy-Item -LiteralPath $global:cod2PatchZip -Destination $Destination -Force; return 0
+        }
+        Mock Write-Host { }
+        Mock Write-Progress { }
+    }
+
+    It 'pins both patches, CoD2x on top of the custom patch' {
+        $game = Get-CatalogGame -Id 'cod2'
+        @($game.Clients | ForEach-Object { $_.Id }) | Should -Be @('cod2-v2', 'cod2x')
+        $patch = $game.Clients[0]
+        $patch.Source | Should -Be 'archive'
+        $patch.Extract | Should -BeTrue
+        $patch.Archive.Url | Should -Be 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD2_CustomPatchv2.zip'
+        $patch.Archive.Size | Should -Be 108810
+        $patch.Archive.Sha256 | Should -Be '6afdb9ce6072ffbbe682282a13026bc72012331f0dafde1bc62a37b2cbc96ddd'
+        @($patch.ArchiveItems | ForEach-Object { "$($_.From)>$($_.To)" }) | Should -Be @('steam/steam.dll>steam.dll', 'steam/cod2patch.ini>cod2patch.ini')
+        @($patch.RequiredFiles) | Should -Be @('steam.dll', 'cod2patch.ini')
+        $cod2x = $game.Clients[1]
+        $cod2x.Archive.Url | Should -Be 'https://github.com/callofduty2x/CoD2x/releases/download/v1.4.6.8/CoD2x_1.4.6.8_windows.zip'
+        $cod2x.Archive.Size | Should -Be 2577745
+        $cod2x.Archive.Sha256 | Should -Be 'c33f52037e67eaa948746a93967d27d8c70ab58623abab48d07803600a6a8555'
+        @($cod2x.ArchiveItems | ForEach-Object { $_.To }) | Should -Be @('mss32.dll', 'mss32_original.dll')
+        @($cod2x.Requires) | Should -Be @('cod2-v2')
+        # Every mode starts once CoD2x, the last layer, is in place.
+        foreach ($mode in $game.Modes) { @($mode.Clients) | Should -Be @('cod2x') }
+    }
+
+    It 'copies only the two items of the patch''s steam folder into the game folder' {
+        $result = Install-GameClient -GameId 'cod2' -ClientId 'cod2-v2' -GameFolder $cod2Folder -RetryDelaySeconds 0
+        $result.Downloaded | Should -Be 2
+        Get-Text (Join-Path $cod2Folder 'steam.dll') | Should -Be 'steam dll'
+        Get-Text (Join-Path $cod2Folder 'cod2patch.ini') | Should -Be 'steam ini'
+        # Nothing of the retail folder, of Info.txt or of the archive's own folder.
+        foreach ($kept in 'winmm.dll', 'Info.txt', 'retail', 'CoD2_CustomPatchv2') {
+            Test-Path -LiteralPath (Join-Path $cod2Folder $kept) | Should -BeFalse -Because $kept
+        }
+        @((Read-ClientRecord -GameFolder $cod2Folder -ClientId 'cod2-v2').Files).Count | Should -Be 2
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'retail miles'
+    }
+
+    It 'refuses CoD2x until the custom patch is installed' {
+        { Install-GameClient -GameId 'cod2' -ClientId 'cod2x' -GameFolder $cod2Folder -RetryDelaySeconds 0 } | Should -Throw '*goes on top of Custom patch v2*'
+        Test-Path -LiteralPath (Join-Path $cod2Folder 'mss32_original.dll') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod2Folder -ClientId 'cod2x') | Should -BeFalse
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'retail miles'
+    }
+
+    It 'installs CoD2x over the patch and puts the retail Miles library back on removal' {
+        $null = Install-GameClient -GameId 'cod2' -ClientId 'cod2-v2' -GameFolder $cod2Folder -RetryDelaySeconds 0
+        $null = Install-GameClient -GameId 'cod2' -ClientId 'cod2x' -GameFolder $cod2Folder -RetryDelaySeconds 0
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'cod2x miles'
+        Get-Text (Join-Path $cod2Folder 'mss32_original.dll') | Should -Be 'retail miles'
+        # The manual in the ZIP is not installed.
+        Test-Path -LiteralPath (Join-Path $cod2Folder 'CoD2x Installation and uninstallation manual.txt') | Should -BeFalse
+        Get-Text (Join-Path $cod2Folder 'steam.dll') | Should -Be 'steam dll'
+        # Removing the patch takes CoD2x with it: the retail library comes back and the
+        # game's own executables are untouched.
+        Remove-GameClient -GameId 'cod2' -ClientId 'cod2-v2' -GameFolder $cod2Folder
+        Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'retail miles'
+        foreach ($gone in 'mss32_original.dll', 'steam.dll', 'cod2patch.ini') {
+            Test-Path -LiteralPath (Join-Path $cod2Folder $gone) | Should -BeFalse -Because $gone
+        }
+        Get-Text (Join-Path $cod2Folder 'CoD2SP_s.exe') | Should -Be 'retail sp'
+        Get-Text (Join-Path $cod2Folder 'CoD2MP_s.exe') | Should -Be 'retail mp'
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod2Folder -ClientId 'cod2x') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod2Folder '.codhq-backups') | Should -BeFalse
+    }
+
+    It 'changes nothing when the ZIP holds no steam files' {
+        $wrong = (Get-CatalogGame -Id 'cod2').Clients[0].PSObject.Copy()
+        $wrong.Archive = @{ Url = 'https://example.com/CoD2_CustomPatchv3.zip'; Size = 1; Sha256 = ('E' * 64) }
+        Remove-Item -LiteralPath $global:cod2PatchZip -Force
+        New-TestZip -Path $global:cod2PatchZip -Entries ([ordered]@{ 'CoD2_CustomPatchv3/retail/winmm.dll' = 'retail dll' })
+        { Install-GameClientArchive -Game (Get-CatalogGame -Id 'cod2') -Client $wrong -GameFolder $cod2Folder -RetryDelaySeconds 0 } | Should -Throw '*did not put steam.dll and cod2patch.ini*'
+        Test-Path -LiteralPath (Join-Path $cod2Folder 'steam.dll') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cod2Folder 'winmm.dll') | Should -BeFalse
+        Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $cod2Folder -ClientId 'cod2-v2') | Should -BeFalse
     }
 }
 
