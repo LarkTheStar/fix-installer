@@ -3045,3 +3045,71 @@ Describe 'CodHQ BOIII release' {
         } finally { $global:SandboxRoot = '' }
     }
 }
+
+Describe 'Legacy CB BOIII install' {
+    It 'removes it through the card button and leaves the card in its no-client state' {
+        $sandbox = Join-Path $TestDrive ('legacy-cb-' + [guid]::NewGuid().ToString('N'))
+        $gameFolder = Join-Path $sandbox 'Black Ops III'
+        $null = New-Item -ItemType Directory -Path $gameFolder -Force
+        $global:SandboxRoot = $sandbox
+        try {
+            $game = Get-CatalogGame -Id 'bo3'
+            # What an earlier version of this utility left: boiii.exe in the game folder,
+            # the data tree in %LOCALAPPDATA%\boiii and its record beside the game. The
+            # game's own BlackOps3.exe is not created, touched or deleted here.
+            $clientFile = Join-Path $gameFolder 'boiii.exe'
+            [IO.File]::WriteAllText($clientFile, 'legacy client exe')
+            $appData = Join-Path $sandbox 'AppData\boiii'
+            $dataFile = Join-Path $appData 'data\main\zone\all_mp.ff'
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $dataFile) -Force
+            [IO.File]::WriteAllText($dataFile, 'legacy zone data')
+            $record = [pscustomobject]@{
+                ClientId = 'boiii'; ClientName = 'BOIII (CB Servers)'; Installer = 'CallOfDutyHQ-SetupUtility'
+                Source = 'manifest'; Manifest = 'boiii.json'
+                Files = @(
+                    [pscustomobject]@{ Path = 'boiii.exe'; Dest = 'game'; Target = $clientFile; Size = (Get-Item -LiteralPath $clientFile).Length; Sha1 = (Get-FileSha1Hex $clientFile) },
+                    [pscustomobject]@{ Path = 'data/main/zone/all_mp.ff'; Dest = 'appdata'; Target = $dataFile; Size = (Get-Item -LiteralPath $dataFile).Length; Sha1 = (Get-FileSha1Hex $dataFile) })
+                Backups = @(); CreatedDirs = @()
+            }
+            Write-ClientRecord -GameFolder $gameFolder -ClientId 'boiii' -Record $record
+
+            # The card offers exactly Remove for that record.
+            $offered = @(Get-GameClientButtons -Game $game -GameFolder $gameFolder)
+            @($offered | Where-Object { $_.Action -eq 'remove' }).Count | Should -Be 1
+            $remove = @($offered | Where-Object { $_.Action -eq 'remove' })[0]
+            $remove.Label | Should -Be 'Remove BOIII (CB Servers)'
+            $remove.Client | Should -Be 'boiii'
+            @($offered | Where-Object { $_.Client -eq 'boiii-codhq' })[0].Label | Should -Be 'Install CodHQ BOIII (Recommended)'
+
+            # The button's tag is what the card's click handler hands to the remove action.
+            Remove-GameClient -GameId $remove.Game -ClientId $remove.Client -GameFolder $gameFolder
+
+            Test-Path -LiteralPath $clientFile -PathType Leaf | Should -BeFalse
+            Test-Path -LiteralPath $dataFile -PathType Leaf | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $appData 'data') -PathType Container | Should -BeFalse
+            Test-Path -LiteralPath (Get-ClientRecordPath -GameFolder $gameFolder -ClientId 'boiii') -PathType Leaf | Should -BeFalse
+
+            # The card afterwards: nothing to remove, the normal no-client install
+            # button, Play still blocked, and Check game exe still on the card.
+            $after = @(Get-GameClientButtons -Game $game -GameFolder $gameFolder)
+            @($after | Where-Object { $_.Action -eq 'remove' }).Count | Should -Be 0
+            @($after | Where-Object { $_.Action -eq 'install' }).Count | Should -Be 1
+            @($after | Where-Object { $_.Action -eq 'install' })[0].Label | Should -Be 'Install CodHQ BOIII (Recommended)'
+            Get-ModeBlocker -Game $game -Mode @($game.Modes)[0] -GameFolder $gameFolder | Should -Match 'needs CodHQ BOIII'
+            $game.ExeCheck | Should -Not -BeNullOrEmpty
+            $game.ExeCheck.File | Should -Be 'BlackOps3.exe'
+
+            # A folder with no record of ours cannot remove anything it does not own.
+            $fresh = Join-Path $sandbox 'fresh'
+            $null = New-Item -ItemType Directory -Path $fresh -Force
+            $bystander = Join-Path $fresh 'boiii.exe'
+            [IO.File]::WriteAllText($bystander, 'not ours')
+            { Remove-GameClient -GameId 'bo3' -ClientId 'boiii' -GameFolder $fresh } | Should -Not -Throw
+            Test-Path -LiteralPath $bystander -PathType Leaf | Should -BeTrue
+            @(Get-GameClientButtons -Game $game -GameFolder $fresh | Where-Object { $_.Action -eq 'remove' }).Count | Should -Be 0
+        } finally {
+            $global:SandboxRoot = ''
+            Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

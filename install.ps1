@@ -4717,7 +4717,18 @@ function Remove-GameClient {
         if ($owners.ContainsKey($target.ToLowerInvariant())) { $shared++; continue }
         if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force -ErrorAction Stop; $removed++ }
     }
-    # A launcher-type client's launcher added files of its own: everything new since
+    # Its files under %LOCALAPPDATA% can leave empty folders behind, and an older record
+    # did not list them: take the empty ones away up to, but not including, the AppData
+    # root, so nothing of the client is left where it used to read its data.
+    $appDataRoot = [IO.Path]::GetFullPath((Get-ClientAppDataRoot)).TrimEnd('\')
+    foreach ($file in @($record.Files)) {
+        if ([string]$file.Dest -ne 'appdata') { continue }
+        $walk = Split-Path -Parent ([string]$file.Target)
+        while ($walk -and $walk.Length -gt $appDataRoot.Length -and $walk.StartsWith($appDataRoot + '\', [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $walk -PathType Container) -and -not (Get-ChildItem -LiteralPath $walk -Force | Select-Object -First 1)) {
+            Remove-Item -LiteralPath $walk -Force -ErrorAction SilentlyContinue
+            $walk = Split-Path -Parent $walk
+        }
+    }    # A launcher-type client's launcher added files of its own: everything new since
     # the install under its watched paths goes (after asking, for whole-game watches).
     $client = $game.Clients | Where-Object { $_.Id -eq $ClientId } | Select-Object -First 1
     # The server key folder is part of what Install set up, so Remove takes it too, and so do
@@ -8289,6 +8300,50 @@ $global:GameActionMap = @{
 }
 
 # Builds one card per catalogue game from its current state.
+# The install records in a game folder whose client this utility no longer ships (CB's
+# BOIII fork): the card offers Remove for these only, so someone who installed one with
+# an earlier version can take it away again.
+function Get-RetiredClientRecords {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$GameFolder)
+    $known = @($Game.Clients | ForEach-Object { [string]$_.Id })
+    $retired = [System.Collections.Generic.List[object]]::new()
+    foreach ($recordFile in @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
+        $record = $null
+        try { $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json } catch { continue }
+        $id = [string]$record.ClientId
+        if (-not $id -or $id -in $known) { continue }
+        $name = if ($record.ClientName) { [string]$record.ClientName } elseif ($id -eq 'boiii') { 'BOIII (CB Servers)' } else { $id }
+        $retired.Add([pscustomobject]@{ Id = $id; Name = $name })
+    }
+    return $retired.ToArray()
+}
+
+# The client-side buttons of a game card, from what is actually in the folder. The card
+# renders exactly these, and the tags are what Run-Action dispatches, so a test can drive
+# the same Remove the button does.
+function Get-GameClientButtons {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)][string]$GameFolder)
+    $buttons = [System.Collections.Generic.List[object]]::new()
+    foreach ($client in $Game.Clients) {
+        if (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $client.Id) {
+            $buttons.Add([pscustomobject]@{ Label = "Update $($client.Name)"; Action = 'update'; Game = $Game.Id; Client = $client.Id; Tip = ''; Enabled = $true })
+            $buttons.Add([pscustomobject]@{ Label = "Remove $($client.Name)"; Action = 'remove'; Game = $Game.Id; Client = $client.Id; Tip = ''; Enabled = $true })
+            if (@($client.ServerKey).Count -gt 0) {
+                $buttons.Add([pscustomobject]@{ Label = 'Set up server key'; Action = 'serverkey'; Game = $Game.Id; Client = $client.Id; Tip = "Downloads the server key registry files again, fills in the key and the game folder and opens them in the registry editor: no game files are downloaded"; Enabled = $true })
+            }
+        } else {
+            $conflict = @($client.Conflicts | Where-Object { Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_ }) | Select-Object -First 1
+            $need = @($client.Requires | Where-Object { -not (Test-GameClientInstalled -GameFolder $GameFolder -ClientId $_) }) | Select-Object -First 1
+            $tip = if ($conflict) { "Remove $(Get-CatalogClientName $conflict) first: both replace the same files." } elseif ($need) { "Install $(Get-CatalogClientName $need $Game) first: this goes on top of it." } elseif ($client.Description) { $client.Description } else { '' }
+            $label = if ($client.Recommended) { "Install $($client.Name) (Recommended)" } else { "Install $($client.Name)" }
+            $buttons.Add([pscustomobject]@{ Label = $label; Action = 'install'; Game = $Game.Id; Client = $client.Id; Tip = $tip; Enabled = (-not $conflict -and -not $need) })
+        }
+    }
+    foreach ($retired in @(Get-RetiredClientRecords -Game $Game -GameFolder $GameFolder)) {
+        $buttons.Add([pscustomobject]@{ Label = "Remove $($retired.Name)"; Action = 'remove'; Game = $Game.Id; Client = $retired.Id; Tip = 'Removes the client files this utility put in the game folder; the game itself is left alone'; Enabled = $true })
+    }
+    return $buttons.ToArray()
+}
 function Update-GamesPage {
     $list = $global:MainWindow.FindName('GamesList')
     if ($null -eq $list) { return }
@@ -8370,32 +8425,8 @@ function Update-GamesPage {
         } elseif ($game.ProjectUrl) { $null = $buttons.Children.Add((& $button 'Open project' @{ Action = 'steam'; Game = $game.Id })) }
         $null = $buttons.Children.Add((& $button 'Change folder' @{ Action = 'folder'; Game = $game.Id } 'Pick the game folder yourself'))
         if ($found -and $game.Available) {
-            foreach ($client in $game.Clients) {
-                if (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id) {
-                    $null = $buttons.Children.Add((& $button "Update $($client.Name)" @{ Action = 'update'; Game = $game.Id; Client = $client.Id }))
-                    $null = $buttons.Children.Add((& $button "Remove $($client.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $client.Id }))
-                    if (@($client.ServerKey).Count -gt 0) {
-                        $null = $buttons.Children.Add((& $button 'Set up server key' @{ Action = 'serverkey'; Game = $game.Id; Client = $client.Id } 'Downloads the server key registry files again, fills in the key and the game folder and opens them in the registry editor: no game files are downloaded'))
-                    }
-                } else {
-                    $conflict = @($client.Conflicts | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_ }) | Select-Object -First 1
-                    $need = @($client.Requires | Where-Object { -not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_) }) | Select-Object -First 1
-                    $tip = if ($conflict) { "Remove $(Get-CatalogClientName $conflict) first: both replace the same files." } elseif ($need) { "Install $(Get-CatalogClientName $need $game) first: this goes on top of it." } elseif ($client.Description) { $client.Description } else { '' }
-                    $installLabel = if ($client.Recommended) { "Install $($client.Name) (Recommended)" } else { "Install $($client.Name)" }
-                    $null = $buttons.Children.Add((& $button $installLabel @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict -and -not $need)))
-                }
-            }
-            # Clients this installer once put here but no longer ships (CB's BOIII fork):
-            # their record is still in the game folder, so only Remove is offered for it,
-            # and nothing of theirs is left behind.
-            $knownClients = @($game.Clients | ForEach-Object { [string]$_.Id })
-            foreach ($recordFile in @(Get-ChildItem -LiteralPath $found.Folder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
-                $record = $null
-                try { $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json } catch { continue }
-                $recordId = [string]$record.ClientId
-                if (-not $recordId -or $recordId -in $knownClients) { continue }
-                $label = if ($record.ClientName) { [string]$record.ClientName } elseif ($recordId -eq 'boiii') { 'BOIII (CB Servers)' } else { $recordId }
-                $null = $buttons.Children.Add((& $button "Remove $label" @{ Action = 'remove'; Game = $game.Id; Client = $recordId } 'Removes the client files this utility put in the game folder; the game itself is left alone'))
+            foreach ($entry in @(Get-GameClientButtons -Game $game -GameFolder $found.Folder)) {
+                $null = $buttons.Children.Add((& $button $entry.Label @{ Action = $entry.Action; Game = $entry.Game; Client = $entry.Client } $entry.Tip ([bool]$entry.Enabled)))
             }
             if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
             foreach ($mode in $game.Modes) {
