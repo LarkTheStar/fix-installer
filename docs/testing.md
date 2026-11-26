@@ -56,7 +56,7 @@ Order, from the least to the most involved:
 | 5 | Black Ops II campaign | T6SP-Mod | campaign starts without Plutonium |
 | 6 | MW2, MW3 campaign | IW4x, AlterWare | Spec Ops through AlterWare |
 | 7 | Advanced Warfare, Infinite Warfare, MWR | S1x, IW7-Mod, H1-Mod (CB) and H1-Mod (AuroraMod) | try both H1-Mod sources one after the other |
-| 8 | Black Ops III | BOIII | **Check game exe** first; Play starts BOIII |
+| 8 | Black Ops III | no client yet (CodHQ BOIII is in development) | Play stays greyed with the development reason; **Check game exe** reports whether your `BlackOps3.exe` carries the PE checksum a client can load (0x6531394) and Steam's Verify restores the original; an install made by an earlier version of this utility shows **Remove BOIII (CB Servers)** and nothing else |
 | 9 | Black Ops 4 | Project BO4 (Shield) | Install takes a while (about 2.2 GB through Shield's launcher); Play Online and Play Offline open Shield's launcher with your name in `project-bo4.json`; press Play Client; **Repair** if the screen stays black; Remove puts your `BlackOps4.exe` and LPC back; Battle.net Scan and Repair clean |
 | 10 | HorizonMW | HMW Launcher | Install opens the HMW Launcher: paste the MWR folder (on the clipboard), Verify game files; then **Play** on the card; Remove asks before deleting what the launcher added |
 
@@ -91,6 +91,15 @@ whole flow again if a download fails; when the page holds no key that can be rea
 `.reg` is still in `key\` with its path, drive and version filled in, and the log says what
 to put in
 it by hand. **Call of Duty 2** installs two patches. **Install Custom patch v2** copies only `steam.dll` and `cod2patch.ini` out of the ZIP's `steam` folder (the `retail` folder and `Info.txt` stay in it), then **Install CoD2x** copies `mss32.dll` and `mss32_original.dll` in. Play must start `CoD2SP_s.exe` and `CoD2MP_s.exe` with the custom patch alone: CoD2x only enhances it, so neither Play button may wait for it, and CoD2x carries `(Recommended)` on its status line and its install button. Remove must take CoD2x away first, put the retail `mss32.dll` back and then delete the patch's two files.
+
+**Black Ops III** has no client while the CodHQ BOIII client is built from our own fork:
+the card must say so, Play must stay disabled with that reason, and no download may
+start from the card. **Check game exe** reads `BlackOps3.exe` and reports its version,
+SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is 0x6531394 (the
+dedicated server's 0x14C28B4 is not it), and a mismatch must recommend Steam's Verify
+integrity. If an earlier version installed CB's BOIII here, the card must offer only
+**Remove BOIII (CB Servers)**, and Remove must take `boiii.exe` and its `data\` tree
+away while leaving your own game files alone.
 
 ## When something fails
 

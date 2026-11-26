@@ -1313,7 +1313,7 @@ Describe 'Game catalogue' {
         $cbCards = [ordered]@{
             cod4 = @('iw3x', 'cod4x', 'iw3sp-mod')
             waw = @('plutonium'); mw2 = @('iw4x'); bo1 = @('plutonium'); mw3 = @('plutonium', 'alterware'); bo2 = @('plutonium', 't6sp-mod')
-            ghosts = @('iw6x'); aw = @('s1x'); bo3 = @('boiii'); iw = @('iw7-mod'); mwr = @('h1-mod'); bo4 = @('shield'); mw2cr = @('h2-mod'); hmw = @('hmw-launcher')
+            ghosts = @('iw6x'); aw = @('s1x'); iw = @('iw7-mod'); mwr = @('h1-mod'); bo4 = @('shield'); mw2cr = @('h2-mod'); hmw = @('hmw-launcher')
         }
         foreach ($id in $cbCards.Keys) {
             $game = $catalog | Where-Object { $_.Id -eq $id }
@@ -1322,6 +1322,20 @@ Describe 'Game catalogue' {
             foreach ($client in $cbCards[$id]) { @($game.Clients.Id) | Should -Contain $client -Because "CB shows it on the $id card" }
             @($game.Modes).Count | Should -BeGreaterThan 0 -Because $id
         }
+    }
+
+    It 'leaves Black Ops III without a client until the CodHQ build exists' {
+        # CB's BOIII fork carries CB's own patches, so it is not shipped: the card has no
+        # client at all until our own fork has a release, and Play says why.
+        $bo3 = Get-CatalogGame -Id 'bo3'
+        @($bo3.Clients).Count | Should -Be 0
+        @($bo3.RetiredClients.Id) | Should -Be @('boiii')
+        @($bo3.Modes)[0].Clients.Count | Should -Be 0
+        Get-ModeBlocker -Game $bo3 -Mode @($bo3.Modes)[0] -GameFolder $TestDrive | Should -Match 'in development'
+        # The game executable is pinned by the PE header checksum the client compares,
+        # with no CB manifest behind it.
+        [int64]$bo3.ExeCheck.Checksum | Should -Be 0x6531394
+        [string]::IsNullOrEmpty([string]$bo3.ExeCheck.Manifest) | Should -BeTrue
     }
 
     It 'names only its own clients as conflicts' {
@@ -1344,7 +1358,7 @@ Describe 'Game catalogue' {
     }
 
     It 'downloads the files each client needs to run' {
-        $needed = @{ 'iw4x' = 'iw4x.exe'; 'iw6x' = 'iw6x.exe'; 's1x' = 's1x.exe'; 'boiii' = 'boiii.exe'; 'h1-mod' = 'h1-mod.exe'; 'iw7-mod' = 'iw7-mod.exe'; 'h2-mod' = 'h2-mod.exe'; 'cod4x' = 'mss32.dll'; 'iw3x' = 'mss32.dll'; 'iw3sp-mod' = 'iw3sp_mod.exe'; 'alterware' = 'alterware-launcher.exe' }
+        $needed = @{ 'iw4x' = 'iw4x.exe'; 'iw6x' = 'iw6x.exe'; 's1x' = 's1x.exe'; 'h1-mod' = 'h1-mod.exe'; 'iw7-mod' = 'iw7-mod.exe'; 'h2-mod' = 'h2-mod.exe'; 'cod4x' = 'mss32.dll'; 'iw3x' = 'mss32.dll'; 'iw3sp-mod' = 'iw3sp_mod.exe'; 'alterware' = 'alterware-launcher.exe' }
         foreach ($id in $needed.Keys) {
             $client = $catalog.Clients | Where-Object { $_.Id -eq $id } | Select-Object -First 1
             Get-ClientEntryVerdict -Client $client -Path $needed[$id] | Should -Be 'allow' -Because $id
@@ -2644,6 +2658,28 @@ Describe 'Checking the player''s own BO3/BO4 executable' {
         $result = Test-GameExecutable -GameId 'bo3' -GameFolder $folder -Manifest (& $manifestFor ('0' * 40) 1)
         $result.Exists | Should -BeFalse
         Should -Invoke Invoke-ResumableDownload -Times 0
+    }
+
+    It 'pins the expected build by its PE header checksum, without a manifest' {
+        $pe = 0x80
+        $peBytes = New-Object byte[] 512
+        $peBytes[0] = 0x4D; $peBytes[1] = 0x5A
+        [BitConverter]::GetBytes([int]$pe).CopyTo($peBytes, 0x3C)
+        [BitConverter]::GetBytes([uint32]0x00004550).CopyTo($peBytes, $pe)
+        [BitConverter]::GetBytes([uint32]0x6531394).CopyTo($peBytes, $pe + 24 + 64)
+        $exe = Join-Path $folder 'BlackOps3.exe'
+        [IO.File]::WriteAllBytes($exe, $peBytes)
+        $result = Test-GameExecutable -GameId 'bo3' -GameFolder $folder
+        $result.ExpectedChecksum | Should -Be 0x6531394
+        $result.Checksum | Should -Be 0x6531394
+        $result.Matches | Should -BeTrue
+
+        # The dedicated server build is a different checksum: not the build a client loads.
+        [BitConverter]::GetBytes([uint32]0x14C28B4).CopyTo($peBytes, $pe + 24 + 64)
+        [IO.File]::WriteAllBytes($exe, $peBytes)
+        $result = Test-GameExecutable -GameId 'bo3' -GameFolder $folder
+        $result.Matches | Should -BeFalse
+        $result.Repair | Should -Match 'Verify integrity'
     }
 }
 

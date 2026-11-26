@@ -2778,9 +2778,12 @@ function New-CatalogMode {
           [bool]$Elevate = $false, [bool]$NoDefaultArguments = $false,
           # Values written to a JSON settings file in the game folder before starting:
           # @{ File = 'x.json'; Values = @{ 'section.key' = 'value' }; NameKey = 'section.key' }.
-          $Config = $null)
+          $Config = $null,
+          # A fixed reason this mode cannot start yet, shown in place of the client
+          # requirement (used while the game's client is still being built).
+          [string]$Blocked = '')
     [pscustomobject]@{ Id = $Id; Label = $Label; Kind = $Kind; Exe = $Exe; Arguments = $Arguments; Clients = @($Clients); UseName = $UseName; Uri = $Uri
-        Elevate = $Elevate; NoDefaultArguments = $NoDefaultArguments; Config = $Config }
+        Elevate = $Elevate; NoDefaultArguments = $NoDefaultArguments; Config = $Config; Blocked = $Blocked }
 }
 
 # Catalogue entries for the files of one release archive: each is taken out of the
@@ -2973,10 +2976,19 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'bo3'; Name = 'Call of Duty: Black Ops III'; Year = '2015'; SteamAppIds = @(311210); Detect = 'steam'
             ValidFiles = @('BlackOps3.exe'); NameArgument = '-name'; DefaultArguments = '-launch -noupdate'
             NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ProjectUrl = ''
-            ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Manifest = 'boiii.json'; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files.' }
-            Clients = @((New-CatalogClient -Id 'boiii' -Name 'BOIII' -Manifest 'boiii.json' -Folder 'boiii/' -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Deny @('BlackOps3.exe')))
-            Note = 'BOIII runs your own BlackOps3.exe; use Check game exe if it does not start.'
-            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii')))
+            # CB's BOIII fork is no longer installed: it is CB's own build with CB's own
+            # patches, and this utility ships only what the community at large publishes or
+            # what we build ourselves. Our own client (built from our fork) takes its place
+            # once it has a release. Until then the player's own game executable can still
+            # be checked: the client loads into the build whose PE header checksum is
+            # 0x6531394 and never replaces it.
+            ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Checksum = 0x6531394; Manifest = ''; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files.' }
+            Clients = @()
+            # What earlier versions of this utility installed for this game. Nothing is
+            # offered from them any more; Remove still takes the files away.
+            RetiredClients = @([pscustomobject]@{ Id = 'boiii'; Name = 'BOIII (CB Servers)' })
+            Note = 'The CodHQ BOIII client is in development: built from our own fork, updated from our own site, and it runs your own BlackOps3.exe without replacing it. The game executable has to be the build the client supports; Steam''s Verify integrity restores the original.'
+            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Blocked 'The CodHQ BOIII client is in development; Play appears once its first release is out.'))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'iw'; Name = 'Call of Duty: Infinite Warfare'; Year = '2016'; SteamAppIds = @(292730); Detect = 'steam'
             ValidFiles = @('iw7_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
@@ -3261,6 +3273,23 @@ function Resolve-ClientTarget {
 function Get-FileSha1Hex { param([Parameter(Mandatory)][string]$Path) Get-FileHashHex -Path $Path -Algorithm SHA1 -Upper }
 
 # The DLLs a Windows executable imports, read from its PE import table.
+# The checksum the executable's own PE optional header carries. Clients compare it to
+# decide which build of the game they can load into, so it identifies a build by its
+# header rather than by a hash of the whole file.
+function Get-ExecutableChecksum {
+    param([Parameter(Mandatory)][string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $buffer = New-Object byte[] 4096
+        $read = $stream.Read($buffer, 0, $buffer.Length)
+    } finally { $stream.Dispose() }
+    if ($read -lt 64 -or $buffer[0] -ne 0x4D -or $buffer[1] -ne 0x5A) { return [int64]0 }
+    $pe = [int][BitConverter]::ToUInt32($buffer, 0x3C)
+    if ($pe -lt 0 -or $pe + 24 + 68 -gt $read -or [BitConverter]::ToUInt32($buffer, $pe) -ne 0x00004550) { return [int64]0 }
+    # The checksum field sits 64 bytes into the optional header, whatever its type.
+    return [int64][BitConverter]::ToUInt32($buffer, $pe + 24 + 64)
+}
+
 function Get-ExecutableImportNames {
     param([Parameter(Mandatory)][string]$Path)
     $bytes = [IO.File]::ReadAllBytes($Path)
@@ -4660,6 +4689,9 @@ function Get-CatalogClientName {
 # Why a mode cannot start right now, or '' when it can.
 function Get-ModeBlocker {
     param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Mode, [Parameter(Mandatory)][string]$GameFolder)
+    # A mode that says up front why it cannot start (a client still being built) never
+    # gets a Play button that would only fail.
+    if ([string]$Mode.Blocked) { return [string]$Mode.Blocked }
     # A Windows error box ("could not be located in the DLL", "Failed to find Steam") is
     # never useful: check the executable's own DLLs first.
     if ($Mode.Kind -eq 'exe') {
@@ -4992,8 +5024,8 @@ function Test-GameExecutable {
     if (-not $GameFolder) { $found = Find-CatalogGame -Game $game; if ($found) { $GameFolder = $found.Folder } }
     if (-not $GameFolder) { throw "$($game.Name) was not found. Pick its folder with Change folder." }
     $file = Join-Path $GameFolder $game.ExeCheck.File
-    $result = [pscustomobject]@{ File = $file; Exists = $false; Version = ''; Product = ''; Size = 0; Sha1 = ''; Sha256 = ''
-        ExpectedSize = 0; ExpectedSha1 = ''; Matches = $false; MissingFiles = @(); Repair = $game.ExeCheck.Repair }
+    $result = [pscustomobject]@{ File = $file; Exists = $false; Version = ''; Product = ''; Size = 0; Sha1 = ''; Sha256 = ''; Checksum = [int64]0
+        ExpectedSize = 0; ExpectedSha1 = ''; ExpectedChecksum = [int64]0; Matches = $false; MissingFiles = @(); Repair = $game.ExeCheck.Repair }
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         Write-Warn "$($game.ExeCheck.File) was not found in $GameFolder."
         Write-Info $game.ExeCheck.Repair
@@ -5012,6 +5044,23 @@ function Test-GameExecutable {
     Write-Info ([string]::Format([cultureinfo]::InvariantCulture, '{0}: version {1}, {2:N0} bytes', $game.ExeCheck.File, $(if ($result.Version) { $result.Version } else { 'unknown' }), $result.Size))
     Write-Info "  SHA-1   $($result.Sha1)"
     Write-Info "  SHA-256 $($result.Sha256)"
+    $result.Checksum = Get-ExecutableChecksum -Path $file
+    Write-Info ('  Checksum 0x{0:X}' -f $result.Checksum)
+    # A build pinned by its PE header checksum needs no manifest at all: that is the
+    # value the client itself compares, and it keeps working when the file's hash is
+    # not something we can publish.
+    $pinnedChecksum = [int64]$(if ($game.ExeCheck.PSObject.Properties['Checksum']) { $game.ExeCheck.Checksum } else { 0 })
+    if ($null -eq $Manifest -and $pinnedChecksum -ne 0) {
+        $result.ExpectedChecksum = $pinnedChecksum
+        $result.Matches = ($pinnedChecksum -eq $result.Checksum)
+        if ($result.Matches) { Write-Ok 'This is the build the client expects.' }
+        else {
+            Write-Warn ('This is a different build than the client expects (checksum 0x{0:X}, found 0x{1:X}).' -f $pinnedChecksum, $result.Checksum)
+            Write-Info $game.ExeCheck.Repair
+        }
+        foreach ($missingFile in $result.MissingFiles) { Write-Info "Not present (may be normal for your edition): $missingFile" }
+        return $result
+    }
     try {
         if ($null -eq $Manifest) { $Manifest = Get-ClientManifest -Manifest $game.ExeCheck.Manifest }
         $expected = $Manifest.Entries | Where-Object { ($_.Path -split '/')[-1] -ieq $game.ExeCheck.File } | Select-Object -First 1
@@ -8134,6 +8183,12 @@ function Update-GamesPage {
                     $installLabel = if ($client.Recommended) { "Install $($client.Name) (Recommended)" } else { "Install $($client.Name)" }
                     $null = $buttons.Children.Add((& $button $installLabel @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict -and -not $need)))
                 }
+            }
+            # Clients this installer once put here but no longer ships (CB's BOIII fork):
+            # only Remove is offered, so nothing of theirs is left behind.
+            foreach ($retired in @($game.RetiredClients | Where-Object { $null -ne $_ })) {
+                if (-not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $retired.Id)) { continue }
+                $null = $buttons.Children.Add((& $button "Remove $($retired.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $retired.Id } 'Removes the client files this utility put in the game folder; the game itself is left alone'))
             }
             if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
             foreach ($mode in $game.Modes) {

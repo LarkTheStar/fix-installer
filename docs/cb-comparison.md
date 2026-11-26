@@ -15,7 +15,7 @@ keeps the catalogue in line with this table.
 | Black Ops 2 | T6 / T6SP-MOD | Plutonium (t6mp, t6zm), T6SP-Mod | yes |
 | Ghosts | IW6X | IW6x | yes |
 | Advanced Warfare | S1X | S1x | yes |
-| Black Ops 3 | BOIII | BOIII | yes |
+| Black Ops 3 | BOIII | nothing installed until the CodHQ BOIII client ships | no: CBs fork is CBs own build with CBs own patches, so it is not shipped; the card keeps Check game exe |
 | Infinite Warfare | IW7-MOD | IW7-Mod | yes |
 | Modern Warfare Remastered | H1-MOD | H1-Mod (CB's build), H1-Mod (AuroraMod release) | yes, plus a second source |
 | World War II | S2X (coming soon) | not in the catalogue | no: CB has not released it, and S2x has no public repository or release |
