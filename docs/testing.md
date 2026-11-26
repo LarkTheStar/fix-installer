@@ -102,7 +102,9 @@ from that same manifest. **Check game exe** reads `BlackOps3.exe` and reports it
 version, SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is 0x6531394
 (the dedicated server's 0x14C28B4 is not it), and a mismatch must recommend Steam's
 Verify integrity. The client never replaces the game executable: an unsupported build
-gets a message and the file stays as it was. If an earlier version installed CB's BOIII
+gets a message and the file stays as it was.
+At startup it also names a proxying DLL beside the game, a WinDivert driver or service, a running
+GoodbyeDPI or a non-Windows Winsock entry in one console message, and does not patch around it. If an earlier version installed CB's BOIII
 here, the card also offers **Remove BOIII (CB Servers)**, and Remove must take
 `boiii.exe` and its `data\` tree away while leaving your own game files alone.
 
