@@ -109,10 +109,15 @@ the site agree), then install and update once from the card: the client replaces
 `boiii.exe` from `boiii.json`, keeps its `data` tree current even with `-noupdate`, and
 the install must still end with the pinned count and every SHA-1 matching. Play starts `boiii.exe` with
 `-launch -noupdate`; the client then updates itself from that same manifest. **Check game exe** reads `BlackOps3.exe` and reports its
-version, SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is 0x6531394
-(the dedicated server's 0x14C28B4 is not it), and a mismatch must recommend Steam's
-Verify integrity. The client never replaces the game executable: an unsupported build
-gets a message and the file stays as it was.
+version, SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is the
+executable released Sept 10, 2026 with PE checksum 0x6531394 (the dedicated server's
+0x14C28B4 is not it), and a mismatch must recommend Steam's Verify integrity. The
+client offers to fix it: on an unsupported build it prompts, downloads `BlackOps3.exe`
+(106,059,256 bytes, SHA-1 `9D03F810...3B9B`, checksum 0x6531394), keeps your own file
+as `BlackOps3.exe.boiii_backup`, installs it and reads it back; Cancel, a failed
+download or a bad hash must leave the file untouched, and the Patches tab's button
+must answer "already the compatible build" when it matches. This utility itself never
+downloads a game file.
 At startup it also names a proxying DLL beside the game, a WinDivert driver or service, a running
 GoodbyeDPI or a non-Windows Winsock entry in one console message, and does not patch around it. If an earlier version installed CB's BOIII
 here, the card also offers **Remove BOIII (CB Servers)**, and Remove must take

@@ -2991,11 +2991,11 @@ function Get-GameCatalog {
             # download, and every file in it is checked against boiii.json from the same
             # site before and after the install. It loads into the build whose PE header
             # checksum is 0x6531394 and never replaces the game executable.
-            ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Checksum = 0x6531394; Manifest = ''; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files.' }
+            ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Checksum = 0x6531394; Manifest = ''; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files. The client can also install the compatible BlackOps3.exe for you (Settings => Patches) and keeps your file as BlackOps3.exe.boiii_backup.' }
             Clients = @((New-CatalogClient -Id 'boiii-codhq' -Name 'CodHQ BOIII' -Source 'codhq' -Manifest 'boiii.json' -ManifestBase 'https://larkthestar.github.io/codhq-boiii/' `
-                -Archive @{ Url = 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'; Size = 7375951; Sha256 = '2312DBA884A3657639434DC5E1B24FB595F1AA9F642A8EB16BF43CCC210ADD50' } `
-                -ManifestCount 196 -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Description 'Our own build, pinned by SHA-256 and verified file by file against our published manifest; updates from our own site and runs your own BlackOps3.exe.' -Recommended))
-            Note = 'CodHQ BOIII is our own build of the community client, updated from our own site. It runs your own BlackOps3.exe and never replaces it, so the game executable has to be the build it supports; Steam''s Verify integrity restores the original.'
+                -Archive @{ Url = 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'; Size = 7385589; Sha256 = 'AC66B5DB91B8D7768BBA683C62EFB2269D00390EFAC8977C1329D468F809A512' } `
+                -ManifestCount 196 -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Description 'Our own build, pinned by SHA-256 and verified file by file against our published manifest; updates from our own site, runs your own BlackOps3.exe, and offers the compatible game executable (checked, backed up) when yours does not match.' -Recommended))
+            Note = 'CodHQ BOIII is our own build of the community client, updated from our own site. It runs your own BlackOps3.exe: if that file is not the build it supports, the client offers to install the compatible one (checked by SHA-1 and PE checksum, your file kept as BlackOps3.exe.boiii_backup), and Steam''s Verify integrity restores the original.'
             Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii-codhq')))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'iw'; Name = 'Call of Duty: Infinite Warfare'; Year = '2016'; SteamAppIds = @(292730); Detect = 'steam'

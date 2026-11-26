@@ -144,8 +144,10 @@ launcher's public client manifests (`docs/cb-launcher/`, re-run with
 - a client file is downloaded only when the client project itself publishes it, and
   checked against its SHA-1 (or a pinned SHA-256);
 - copies of a game's own files (executables, the Bink and Miles libraries, BO3/BO4
-  executables) are never downloaded: your own are used, and where a client needs one
-  under another name it is made from yours when it is the right build;
+  executables) are never downloaded by this utility: your own are used, and where a
+  client needs one under another name it is made from yours when it is the right build
+  (the Black Ops III client itself can offer the official compatible executable, with
+  your consent and a backup - see **Check game exe** below);
 - a file added to a manifest after the audit is skipped until the catalogue is updated;
 - Activision's game files are never downloaded: Shield's launcher fetches what
   Project BO4 needs itself, and Call of Duty (2003) 1.1 is the copy published in this
@@ -157,7 +159,12 @@ launcher's public client manifests (`docs/cb-launcher/`, re-run with
 **Play** builds the exact command line the CB launcher uses for each mode and adds
 your player name; it warns when your game build differs from the one the client was
 installed against. **Check game exe** compares your own `BlackOps3.exe` /
-`BlackOps4.exe` with the build its client expects. **CD key** shows your key masked,
+`BlackOps4.exe` with the build its client expects; for Black Ops III that is the
+executable released Sept 10, 2026 (PE checksum `0x6531394`). If yours does not match,
+the client offers to download and install that executable, checked by SHA-1 and PE
+checksum and keeping your file as `BlackOps3.exe.boiii_backup`; **Settings => Patches**
+in the client does the same on demand, and declining leaves your own file untouched.
+**CD key** shows your key masked,
 backs it up, saves the key you type (from Steam: right-click the game > Manage > CD
 Keys) and restores a backup; keys never appear in the activity log. Plutonium games
 need a free Plutonium account: use **Plutonium login** once.
