@@ -1,0 +1,63 @@
+name: CodHQ BOIII release check
+
+# The installer pins one published CodHQ BOIII release by the ZIP's size and SHA-256 and
+# by how many files its manifest lists. A new fork release makes that pin stale, and the
+# installer then refuses to install until it is updated. This runs every day so the drift
+# shows up as an issue here instead of in a user's first install attempt.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pin:
+    name: Compare the published release with the pin
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the pin and the site
+        id: check
+        shell: powershell
+        continue-on-error: true
+        run: .\tools\Update-BoiiiPin.ps1 -Check | Tee-Object -FilePath pin-check.txt
+
+      - name: Say the pin is current
+        if: steps.check.outcome == 'success'
+        shell: powershell
+        run: Write-Output 'The published release still matches the pin.'
+
+      - name: Open an issue for a stale pin
+        if: steps.check.outcome != 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          title="CodHQ BOIII release moved on from the pinned build"
+          {
+            echo "The CodHQ BOIII site publishes a release that does not match the pin in \`install.ps1\`, so installing Black Ops III from the Games page fails until it is updated."
+            echo
+            echo 'Run this, then the tests, and commit:'
+            echo
+            echo '```'
+            echo 'powershell -File .\tools\Update-BoiiiPin.ps1'
+            echo '.\tests\Invoke-Tests.ps1'
+            echo '```'
+            echo
+            echo '```'
+            cat pin-check.txt
+            echo '```'
+          } > issue.md
+          existing="$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number')"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body-file issue.md
+          else
+            gh issue create --title "${title}" --body-file issue.md
+          fi
+          exit 1

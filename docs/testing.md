@@ -102,7 +102,12 @@ and every entry's size and SHA-1 have to match before anything is written. It th
 install back, and checks the count and every SHA-1 again. A missing, changed or extra
 file must fail with a message naming that file and asking for a re-download, then a retry
 after deleting `%LOCALAPPDATA%\boiii`, and nothing that was written may stay behind: a
-partial or corrupt install never counts as installed. Play starts `boiii.exe` with
+partial or corrupt install never counts as installed. After the fork publishes a new
+`v*` tag, run `tools\Update-BoiiiPin.ps1` and commit the size, SHA-256 and count it
+writes (its `-Check` form, which the daily workflow runs, must report that the pin and
+the site agree), then install and update once from the card: the client replaces
+`boiii.exe` from `boiii.json`, keeps its `data` tree current even with `-noupdate`, and
+the install must still end with the pinned count and every SHA-1 matching. Play starts `boiii.exe` with
 `-launch -noupdate`; the client then updates itself from that same manifest. **Check game exe** reads `BlackOps3.exe` and reports its
 version, SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is 0x6531394
 (the dedicated server's 0x14C28B4 is not it), and a mismatch must recommend Steam's

@@ -103,6 +103,16 @@ language pack does not start over. After replacing a release file, run
 `tools\Get-ReleaseHashes.ps1` and paste its output into `Get-ReleaseAssetHash` in the
 same commit; until then the utility refuses the new file.
 
+**CodHQ BOIII is pinned the same way, and that pin has a tool.** The Black Ops III card
+installs one published release of our own client, identified by the SHA-256 and size of
+`codhq-boiii.zip` and by how many files its `boiii.json` lists. When the client's fork
+publishes a new `v*` tag, run
+`powershell -File .\tools\Update-BoiiiPin.ps1` and commit what it writes; pass `-Check`
+to only compare the pin with the site, which is also what the daily
+**CodHQ BOIII release check** workflow does, so a stale pin shows up there before it
+reaches a user. The live release test then downloads the archive and verifies every
+file, so a pin that was not updated fails the tests.
+
 ## Games
 
 The **Games** page lists 17 older titles: Call of Duty (2003), United Offensive, Call
