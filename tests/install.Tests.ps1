@@ -1101,6 +1101,19 @@ Describe 'Downloads: retries, resume and checksum' {
         $result.Sha256 | Should -Be $payloadHash
     }
 
+    It 'computes both checksums without the Get-FileHash cmdlet' {
+        $file = Join-Path $TestDrive ('hash-' + [guid]::NewGuid().ToString('N') + '.bin')
+        [IO.File]::WriteAllBytes($file, $payload)
+        Get-FileSha256 -Path $file | Should -Be (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        Get-FileSha1Hex $file | Should -Be (Get-FileHash -LiteralPath $file -Algorithm SHA1).Hash.ToUpperInvariant()
+        # A Windows PowerShell process started by a PowerShell 7 one inherits PowerShell
+        # 7's module path, where Get-FileHash cannot be loaded ("not recognized"): the
+        # checksum must come from .NET, not from that cmdlet.
+        foreach ($name in 'Get-FileHashHex', 'Get-FileSha256', 'Get-FileSha1Hex') {
+            (Get-Command $name).Definition | Should -Not -Match '\bGet-FileHash\b' -Because $name
+        }
+    }
+
     It 'deletes a download whose SHA-1 does not match its manifest' {
         $server = Start-TestHttpServer -Content $payload
         { Invoke-ResumableDownload -Url $server.Url -Destination $target -Label 'test' -ExpectedSha256 '' -ExpectedSha1 ('A' * 40) -RetryDelaySeconds 0 } | Should -Throw '*does not match its manifest*'
@@ -1878,8 +1891,9 @@ Describe 'Call of Duty 2 patches' {
         $cod2x.Archive.Sha256 | Should -Be 'c33f52037e67eaa948746a93967d27d8c70ab58623abab48d07803600a6a8555'
         @($cod2x.ArchiveItems | ForEach-Object { $_.To }) | Should -Be @('mss32.dll', 'mss32_original.dll')
         @($cod2x.Requires) | Should -Be @('cod2-v2')
-        # Every mode starts once CoD2x, the last layer, is in place.
-        foreach ($mode in $game.Modes) { @($mode.Clients) | Should -Be @('cod2x') }
+        # Every mode plays with the custom patch alone: CoD2x only enhances it, so no Play
+        # button waits for it.
+        foreach ($mode in $game.Modes) { @($mode.Clients) | Should -Be @('cod2-v2') }
     }
 
     It 'copies only the two items of the patch''s steam folder into the game folder' {
@@ -1893,6 +1907,19 @@ Describe 'Call of Duty 2 patches' {
         }
         @((Read-ClientRecord -GameFolder $cod2Folder -ClientId 'cod2-v2').Files).Count | Should -Be 2
         Get-Text (Join-Path $cod2Folder 'mss32.dll') | Should -Be 'retail miles'
+    }
+
+    It 'lets both modes play with the custom patch alone, without CoD2x' {
+        $game = Get-CatalogGame -Id 'cod2'
+        # The patch is the one requirement: both Play buttons wait only for it.
+        foreach ($mode in $game.Modes) { Get-ModeBlocker -Game $game -Mode $mode -GameFolder $cod2Folder | Should -BeLike '*needs Custom patch v2*' }
+        $null = Install-GameClient -GameId 'cod2' -ClientId 'cod2-v2' -GameFolder $cod2Folder -RetryDelaySeconds 0
+        # CoD2x enhances the patch; neither mode needs it to start.
+        foreach ($mode in $game.Modes) {
+            Get-ModeBlocker -Game $game -Mode $mode -GameFolder $cod2Folder | Should -Be '' -Because "$($mode.Label) plays with the custom patch alone"
+            Test-Path -LiteralPath (Join-Path $cod2Folder $mode.Exe) -PathType Leaf | Should -BeTrue -Because $mode.Exe
+        }
+        Test-Path -LiteralPath (Join-Path $cod2Folder 'mss32_original.dll') | Should -BeFalse
     }
 
     It 'refuses CoD2x until the custom patch is installed' {

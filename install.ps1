@@ -769,9 +769,25 @@ function Get-ExpectedDownloadHash {
     return $hash
 }
 
+# Every checksum this script computes goes through .NET, not Get-FileHash: that cmdlet
+# lives in a module, and a Windows PowerShell process started by a PowerShell 7 one
+# inherits PowerShell 7's module path, where the module cannot be loaded and the
+# download checksum fails with "Get-FileHash is not recognized".
+function Get-FileHashHex {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][ValidateSet('SHA1', 'SHA256')][string]$Algorithm, [switch]$Upper)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $hasher = [Security.Cryptography.HashAlgorithm]::Create($Algorithm)
+        try { $hex = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '') }
+        finally { $hasher.Dispose() }
+    } finally { $stream.Dispose() }
+    if ($Upper) { return $hex.ToUpperInvariant() }
+    return $hex.ToLowerInvariant()
+}
+
 function Get-FileSha256 {
     param([Parameter(Mandatory)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-FileHashHex -Path $Path -Algorithm SHA256
 }
 
 # One attempt at a download. With -ResumeFrom it asks the server for the rest of
@@ -898,7 +914,7 @@ function Invoke-ResumableDownload {
         throw "The downloaded file does not match its published checksum (expected SHA-256 $ExpectedSha256, got $sha256). It was deleted and nothing was installed from it."
     }
     $sha1 = ''
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha1) -or $PassThru) { $sha1 = (Get-FileHash -LiteralPath $Destination -Algorithm SHA1).Hash.ToUpperInvariant() }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha1) -or $PassThru) { $sha1 = Get-FileSha1Hex -Path $Destination }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedSha1) -and $sha1 -ne $ExpectedSha1.ToUpperInvariant()) {
         Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
         throw "The downloaded file does not match its manifest (expected SHA-1 $ExpectedSha1, got $sha1). It was deleted and nothing was installed from it."
@@ -1449,12 +1465,12 @@ function Install-LanguagePack {
             } finally { $entryStream.Dispose() }
             $actualLength = (Get-Item -LiteralPath $item.StagePath).Length
             if ([int64]$actualLength -ne [int64]$item.Entry.Length) { throw "Entry length mismatch while extracting: $($item.Relative)" }
-            $item | Add-Member -NotePropertyName SHA256 -NotePropertyValue ((Get-FileHash -LiteralPath $item.StagePath -Algorithm SHA256).Hash.ToLowerInvariant())
+            $item | Add-Member -NotePropertyName SHA256 -NotePropertyValue (Get-FileSha256 -Path $item.StagePath)
             Write-Progress -Activity "Staging $languageName" -Status "$stageIndex / $($planned.Count) files" -PercentComplete ([int](100 * $stageIndex / [Math]::Max(1,$planned.Count)))
         }
         Write-Progress -Activity "Staging $languageName" -Completed
         $archive.Dispose(); $archive = $null
-        $archiveHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $archiveHash = Get-FileSha256 -Path $zipPath
         $newPaths = [System.Collections.Generic.List[object]]::new()
         foreach ($existingPathState in @($state.Paths)) { $newPaths.Add($existingPathState) }
         $pathIndexByKey = @{}
@@ -1469,7 +1485,7 @@ function Install-LanguagePack {
                 $prior = $newPaths[$idx]
                 if ([string]$prior.Hash -ne [string]$item.SHA256) { throw "This pack's file differs from a file already managed at '$($item.Relative)'. Nothing was committed, to avoid corrupting a shared path." }
                 if (-not (Test-Path -LiteralPath $item.TargetPath -PathType Leaf)) { throw "Managed shared file is missing: $($item.TargetPath)" }
-                $currentHash = (Get-FileHash -LiteralPath $item.TargetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $currentHash = Get-FileSha256 -Path $item.TargetPath
                 if ($currentHash -ne [string]$prior.Hash) { throw "Managed shared file was changed outside the manager: $($item.TargetPath). Restore it before installing another pack." }
                 $owners = @($prior.Owners)
                 if ($owners -notcontains $languageName) { $owners += $languageName }
@@ -1614,7 +1630,7 @@ function Remove-LanguagePack {
         if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { throw "Tracked language file is missing: $dest. No files were changed." }
         $item = Get-Item -LiteralPath $dest -Force
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Tracked file is a reparse point: $dest. No files were changed." }
-        $actualHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-FileSha256 -Path $dest
         if ($actualHash -ne [string]$pathState.Hash) { throw "Tracked file was changed outside the manager: $dest. No files were changed; restore the expected file before retrying." }
         if (@($pathState.Owners).Count -eq 1 -and [bool]$pathState.OriginalExisted) {
             $original = Join-Path (Join-Path $managerRoot 'original-files') ([string]$pathState.OriginalBackupRelative)
@@ -2889,7 +2905,9 @@ function Get-GameCatalog {
                     Url = 'https://github.com/callofduty2x/CoD2x/releases/download/v1.4.6.8/CoD2x_1.4.6.8_windows.zip'
                     Size = 2577745
                     Sha256 = 'c33f52037e67eaa948746a93967d27d8c70ab58623abab48d07803600a6a8555' }))
-            Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoD2SP_s.exe' -Clients @('cod2x')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoD2MP_s.exe' -Clients @('cod2x')))
+            # The custom patch is the whole requirement: the game plays both modes with it
+            # alone. CoD2x only adds to it, so Play is not held back until it is installed.
+            Modes = @((New-CatalogMode 'sp' 'Singleplayer' -Exe 'CoD2SP_s.exe' -Clients @('cod2-v2')), (New-CatalogMode 'mp' 'Multiplayer' -Exe 'CoD2MP_s.exe' -Clients @('cod2-v2')))
             Note = 'Custom patch v2 first, then CoD2x on top of it: both copy only their own files into the game folder. Remove takes CoD2x away first, puts your own mss32.dll back, then takes the patch''s two files away.'
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'cod4'; Name = 'Call of Duty 4: Modern Warfare'; Year = '2007'; SteamAppIds = @(7940); Detect = 'steam'
@@ -3237,7 +3255,7 @@ function Resolve-ClientTarget {
     return [pscustomobject]@{ Dest = $Dest; Root = $root; Target = $full; Relative = $relative }
 }
 
-function Get-FileSha1Hex { param([Parameter(Mandatory)][string]$Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToUpperInvariant() }
+function Get-FileSha1Hex { param([Parameter(Mandatory)][string]$Path) Get-FileHashHex -Path $Path -Algorithm SHA1 -Upper }
 
 # The DLLs a Windows executable imports, read from its PE import table.
 function Get-ExecutableImportNames {
