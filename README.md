@@ -122,7 +122,7 @@ and installs the community client that brings it back online:
 | iw3x or CoD4x, IW3SP-Mod | CoD4 (MP; campaign) |
 | T6SP-Mod | Black Ops II (campaign) |
 | IW6x, S1x, IW7-Mod, H1-Mod, H2-Mod | Ghosts, AW, IW, MWR, MW2 Campaign Remastered |
-| CodHQ BOIII (our own build, published and updated from our site) | Black Ops III |
+| CodHQ BOIII (our own build; one ZIP from our site, pinned by its SHA-256 and verified file by file after install) | Black Ops III |
 | Shield's official launcher | Black Ops 4 (Project BO4: online or offline) |
 | HorizonMW's official launcher | HorizonMW (on Modern Warfare Remastered) |
 | AuroraMod's H1-Mod release | MWR (as an alternative to CB's build) |

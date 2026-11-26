@@ -2745,6 +2745,9 @@ function New-CatalogClient {
         # A release archive installed exactly as published: it goes into the game folder
         # as it is (pinned by SHA-256; its contents are not listed in the catalogue).
         $Archive = $null, [bool]$Extract = $false,
+        # For a client shipped as one pinned archive: how many files its published
+        # manifest has to list, so a release the utility does not know is caught.
+        [int]$ManifestCount = 0,
         # Clients this one is put on top of: they have to be installed first.
         [string[]]$Requires = @(),
         # Files the archive has to contain; the game's marker files when empty.
@@ -2772,7 +2775,7 @@ function New-CatalogClient {
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description; Recommended = [bool]$Recommended
-        Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
+        Archive = $Archive; Extract = $Extract; ManifestCount = $ManifestCount; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
         CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ArchiveItems = @($ArchiveItems)
         ServerKey = @(@($ServerKey) | Where-Object { $null -ne $_ }) }
 }
@@ -2983,15 +2986,15 @@ function Get-GameCatalog {
             NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ProjectUrl = ''
             # CB's BOIII fork is not offered: it is CB's own build with CB's own patches.
             # Our own client replaces it: built from our fork (LarkTheStar/codhq-boiii) by
-            # its CI, which publishes boiii.exe, the whole data tree and boiii.json to our
-            # GitHub Pages, so the client updates from our site and not from CB's mirrors.
-            # It loads into the build whose PE header checksum is 0x6531394 and never
-            # replaces the game executable.
+            # its CI, which publishes one ZIP with boiii.exe, the whole data tree and
+            # boiii.json to our GitHub Pages. The ZIP is pinned by the SHA-256 of the whole
+            # download, and every file in it is checked against boiii.json from the same
+            # site before and after the install. It loads into the build whose PE header
+            # checksum is 0x6531394 and never replaces the game executable.
             ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Checksum = 0x6531394; Manifest = ''; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files.' }
-            Clients = @((New-CatalogClient -Id 'boiii-codhq' -Name 'CodHQ BOIII' -Source 'manifest' -Manifest 'boiii.json' -ManifestBase 'https://larkthestar.github.io/codhq-boiii/' -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Description 'Built from our own fork; updates from our own site and runs your own BlackOps3.exe.' -Recommended))
-            # What earlier versions of this utility installed for this game. Nothing is
-            # offered from them any more; Remove still takes the files away.
-            RetiredClients = @([pscustomobject]@{ Id = 'boiii'; Name = 'BOIII (CB Servers)' })
+            Clients = @((New-CatalogClient -Id 'boiii-codhq' -Name 'CodHQ BOIII' -Source 'codhq' -Manifest 'boiii.json' -ManifestBase 'https://larkthestar.github.io/codhq-boiii/' `
+                -Archive @{ Url = 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'; Size = 7508452; Sha256 = '729D652AC538A393BB72C3D67AEA0ED1C7703006DB72E23385E2860FACB4E1FE' } `
+                -ManifestCount 196 -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Description 'Our own build, pinned by SHA-256 and verified file by file against our published manifest; updates from our own site and runs your own BlackOps3.exe.' -Recommended))
             Note = 'CodHQ BOIII is our own build of the community client, updated from our own site. It runs your own BlackOps3.exe and never replaces it, so the game executable has to be the build it supports; Steam''s Verify integrity restores the original.'
             Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii-codhq')))
             Available = $true; UnavailableReason = '' }
@@ -4274,6 +4277,181 @@ function Install-GameClientArchive {
     return [pscustomobject]@{ GameFolder = $GameFolder; Downloaded = $files.Count; Current = 0; Derived = 0; Kept = $backups.Count; Skipped = 0; KeyInstalled = $keyApplied }
 }
 
+# The published CodHQ BOIII release: one ZIP and one manifest, both on our own site.
+# The ZIP is pinned by the SHA-256 of the whole download; the manifest says how many
+# files it has and what each one's size and SHA-1 are. The archive is checked against
+# it before a single file reaches the game folder or %LOCALAPPDATA%, and an entry is
+# unpacked into the work folder only after it matched, so a bad release never writes.
+#
+# Checks a downloaded release against the manifest it came with: the count has to be
+# the one the catalogue pins, and every entry has to be in the ZIP with the size and
+# SHA-1 the manifest gives it. Matching entries are unpacked under FilesRoot as they
+# are checked, so the caller never writes a file that was not verified.
+function Test-CodhqArchiveEntries {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)]$Entries, [Parameter(Mandatory)][string]$FilesRoot)
+    $expectedCount = [int]$Client.ManifestCount
+    if (@($Entries).Count -ne $expectedCount) {
+        throw "$($Client.Name) publishes $(@($Entries).Count) file(s), but this utility expects $expectedCount. Update the utility to the release, then try again. Nothing was changed."
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $byName = @{}
+        foreach ($zipEntry in $zip.Entries) {
+            if ($zipEntry.FullName.EndsWith('/')) { continue }
+            $byName[($zipEntry.FullName -replace '\\', '/').ToLowerInvariant()] = $zipEntry
+        }
+        foreach ($entry in @($Entries)) {
+            $zipEntry = $byName[([string]$entry.Path).ToLowerInvariant()]
+            if ($null -eq $zipEntry) {
+                throw "The published $($Client.Name) archive does not contain $($entry.Path), which its manifest lists. Download the client again; if it repeats, the release at $($Client.ManifestBase) is incomplete. Nothing was changed."
+            }
+            if ($zipEntry.Length -ne [int64]$entry.Size) {
+                throw "In the published $($Client.Name) archive, $($entry.Path) is $($zipEntry.Length) bytes, but its manifest says $($entry.Size). Download the client again; if it repeats, the release at $($Client.ManifestBase) is inconsistent. Nothing was changed."
+            }
+            $stream = $zipEntry.Open()
+            try {
+                $sha1 = [Security.Cryptography.SHA1]::Create()
+                try { $actual = ([BitConverter]::ToString($sha1.ComputeHash($stream)) -replace '-', '').ToUpperInvariant() } finally { $sha1.Dispose() }
+            } finally { $stream.Dispose() }
+            if ($actual -ne ([string]$entry.Sha1).ToUpperInvariant()) {
+                throw "In the published $($Client.Name) archive, $($entry.Path) has SHA-1 $actual, but its manifest says $($entry.Sha1). Download the client again; if it repeats, the release at $($Client.ManifestBase) is inconsistent. Nothing was changed."
+            }
+            $staged = Join-Path $FilesRoot ([string]$entry.Path -replace '/', '\')
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $staged) -Force
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($zipEntry, $staged, $true)
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
+# Downloads the pinned release and checks it as above; returns the manifest, its
+# entries and the checked, unpacked files the installer writes from.
+function Get-CodhqRelease {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$WorkRoot, [int]$RetryDelaySeconds = 3)
+    $archive = $Client.Archive
+    if (-not $archive -or -not $archive.Url -or -not $archive.Sha256) {
+        throw "$($Client.Name) has no pinned download in this utility. Update the utility, then try again. Nothing was changed."
+    }
+    $pin = ([string]$archive.Sha256).ToUpperInvariant()
+    if ($pin -notmatch '^[0-9A-F]{64}$') { throw "The pinned SHA-256 of $($Client.Name) is not a SHA-256. Nothing was changed." }
+    $expectedCount = [int]$Client.ManifestCount
+    if ($expectedCount -le 0) { throw "$($Client.Name) does not say how many files its release contains. Update the utility, then try again. Nothing was changed." }
+
+    Write-Info "Reading the file list of $($Client.Name) from our site ..."
+    $manifest = Get-ClientManifest -Manifest $Client.Manifest -Bases @([string]$Client.ManifestBase)
+    $entries = @($manifest.Entries)
+    if ($entries.Count -ne $expectedCount) {
+        throw "$($Client.Name) publishes $($entries.Count) file(s), but this utility expects $expectedCount. Update the utility to the release, then try again. Nothing was changed."
+    }
+
+    $null = New-Item -ItemType Directory -Path $WorkRoot -Force
+    $zipPath = Join-Path $WorkRoot 'codhq-release.zip'
+    Write-Info ([string]::Format([cultureinfo]::InvariantCulture, 'Downloading {0} ({1:N1} MB) ...', $Client.Name, ([double]$archive.Size / 1MB)))
+    $null = Invoke-ResumableDownload -Url ([string]$archive.Url) -Destination $zipPath -Label $Client.Name -ExpectedSha256 $pin -RetryDelaySeconds $RetryDelaySeconds -PassThru
+    Write-Ok "The download matches the pinned SHA-256 $($pin.Substring(0, 16))... ."
+
+    $filesRoot = Join-Path $WorkRoot 'files'
+    Test-CodhqArchiveEntries -Client $Client -ZipPath $zipPath -Entries $entries -FilesRoot $filesRoot
+    Write-Ok "All $($entries.Count) file(s) in the archive match the published manifest."
+    return [pscustomobject]@{ Manifest = $manifest; Entries = $entries; ZipPath = $zipPath; FilesRoot = $filesRoot; ArchiveSha256 = $pin }
+}
+# Install from that checked release: boiii.exe into the game folder, the data tree into
+# %LOCALAPPDATA%\boiii, each file written under a journal. The finished install is read
+# back and compared with the manifest again; anything that does not match puts back what
+# was changed and fails with the file that did not match.
+# Reads a finished install back and compares it with the published manifest: every entry
+# has to be where the client reads it, with the size and SHA-1 the manifest gives it, and
+# there has to be the number the catalogue pins. The first file that does not match is
+# named, with what to do about it, so a partial or corrupt install never counts.
+function Assert-CodhqInstalled {
+    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)]$Entries, [Parameter(Mandatory)][string]$GameFolder)
+    $appDataFolder = '%LOCALAPPDATA%\' + $Client.AppData
+    $checked = 0
+    foreach ($entry in @($Entries)) {
+        $target = Resolve-ClientTarget -Client $Client -Path $entry.Path -Dest $entry.Dest -GameFolder $GameFolder
+        if (-not (Test-Path -LiteralPath $target.Target -PathType Leaf)) {
+            throw "After installing $($Client.Name), $($entry.Path) is missing. Download the client again; if it repeats, delete $appDataFolder and install again. What was written has been put back."
+        }
+        $length = (Get-Item -LiteralPath $target.Target).Length
+        if ($length -ne [int64]$entry.Size) {
+            throw "After installing $($Client.Name), $($entry.Path) is $length bytes but its manifest says $($entry.Size). Download the client again; if it repeats, delete $appDataFolder and install again. What was written has been put back."
+        }
+        $actual = Get-FileSha1Hex $target.Target
+        if ($actual -ne ([string]$entry.Sha1).ToUpperInvariant()) {
+            throw "After installing $($Client.Name), $($entry.Path) has SHA-1 $actual but its manifest says $($entry.Sha1). Download the client again; if it repeats, delete $appDataFolder and install again. What was written has been put back."
+        }
+        $checked++
+    }
+    if ($checked -ne [int]$Client.ManifestCount) {
+        throw "After installing $($Client.Name), $checked file(s) were found but $($Client.ManifestCount) were expected. Download the client again; if it repeats, delete $appDataFolder and install again. What was written has been put back."
+    }
+    return $checked
+}
+function Install-CodhqClient {
+    param([Parameter(Mandatory)]$Game, [Parameter(Mandatory)]$Client, [Parameter(Mandatory)][string]$GameFolder, [int]$RetryDelaySeconds = 3)
+    $stage = Join-Path $env:TEMP ('codhq-' + $Client.Id + '-' + [guid]::NewGuid().ToString('N'))
+    $journal = [System.Collections.Generic.List[object]]::new()
+    $createdDirs = [System.Collections.Generic.List[string]]::new()
+    $backups = [System.Collections.Generic.List[object]]::new()
+    $backupRoot = Get-ClientBackupRoot -GameFolder $GameFolder -ClientId $Client.Id
+    try {
+        $release = Get-CodhqRelease -Client $Client -WorkRoot $stage -RetryDelaySeconds $RetryDelaySeconds
+        Write-Info "Installing $($Client.Name) ..."
+        $files = [System.Collections.Generic.List[object]]::new()
+        foreach ($entry in $release.Entries) {
+            $target = Resolve-ClientTarget -Client $Client -Path $entry.Path -Dest $entry.Dest -GameFolder $GameFolder
+            Test-SafeGameDestination -TargetRoot $target.Root -Destination $target.Target
+            foreach ($dir in (New-TrackedDirectory -Path (Split-Path -Parent $target.Target))) { $createdDirs.Add($dir) }
+            $existed = Test-Path -LiteralPath $target.Target -PathType Leaf
+            $backupPath = $null
+            if ($existed) {
+                $backupPath = Join-Path $backupRoot ($target.Dest + '\' + $target.Relative)
+                $null = New-Item -ItemType Directory -Path (Split-Path -Parent $backupPath) -Force
+                Copy-Item -LiteralPath $target.Target -Destination $backupPath -Force -ErrorAction Stop
+                $backups.Add([pscustomobject]@{ Target = $target.Target; Backup = $backupPath })
+            }
+            $journal.Add([pscustomobject]@{ Target = $target.Target; Existed = $existed; Backup = $backupPath })
+            Copy-FileAtomically -Source (Join-Path $release.FilesRoot ($entry.Path -replace '/', '\')) -Destination $target.Target
+            $files.Add([pscustomobject]@{ Path = $entry.Path; Dest = $target.Dest; Target = $target.Target; Size = [int64]$entry.Size; Sha1 = ([string]$entry.Sha1).ToUpperInvariant(); Sha256 = (Get-FileSha256 -Path $target.Target) })
+        }
+
+        $null = Assert-CodhqInstalled -Client $Client -Entries $release.Entries -GameFolder $GameFolder
+        if ($files.Count -ne [int]$Client.ManifestCount) {
+            throw "After installing $($Client.Name), $($files.Count) file(s) were placed but $($Client.ManifestCount) were expected. What was written has been put back."
+        }
+
+        $record = [pscustomobject]@{
+            ClientId = $Client.Id; ClientName = $Client.Name; Installer = 'CodHQ-Setup'; InstalledAt = (Get-Date).ToString('o')
+            Source = 'codhq'; ArchiveUrl = [string]$Client.Archive.Url; ArchiveSha256 = $release.ArchiveSha256
+            Manifest = [string]$Client.Manifest; ManifestBase = [string]$Client.ManifestBase; EntryCount = $release.Entries.Count
+            Files = @($files.ToArray()); Backups = @($backups.ToArray()); CreatedDirs = @($createdDirs.ToArray()); Snapshot = @()
+        }
+        Write-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id -Record $record
+        Write-Ok "$($Client.Name) installed: $($release.Entries.Count) file(s) verified against the published manifest."
+        return [pscustomobject]@{ Downloaded = $release.Entries.Count }
+    } catch {
+        if ($journal.Count -gt 0) {
+            Write-Warn "Installing $($Client.Name) did not finish; putting back what was changed ..."
+            for ($i = $journal.Count - 1; $i -ge 0; $i--) {
+                $change = $journal[$i]
+                try {
+                    if ($change.Backup -and (Test-Path -LiteralPath $change.Backup)) {
+                        Copy-FileAtomically -Source $change.Backup -Destination $change.Target
+                        Remove-Item -LiteralPath $change.Backup -Force -ErrorAction SilentlyContinue
+                    } elseif (-not $change.Existed -and (Test-Path -LiteralPath $change.Target)) {
+                        Remove-Item -LiteralPath $change.Target -Force -ErrorAction Stop
+                    }
+                } catch { Write-Warn "Could not undo: $($change.Target)" }
+            }
+        }
+        throw
+    } finally {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-GameClient {
     param([Parameter(Mandatory)][string]$GameId, [Parameter(Mandatory)][string]$ClientId, [string]$GameFolder = '', $Manifest = $null, [int]$RetryDelaySeconds = 3,
           # Take the newest release of a GitHub client instead of the pinned one.
@@ -4324,6 +4502,10 @@ function Install-GameClient {
             if (-not $otherName) { $otherName = $other }
             throw "$($client.Name) and $otherName replace the same files and cannot be installed together. Remove $otherName first; nothing was changed."
         }
+    }
+
+    if ($client.Source -eq 'codhq') {
+        return (Install-CodhqClient -Game $game -Client $client -GameFolder $GameFolder -RetryDelaySeconds $RetryDelaySeconds)
     }
 
     if ($client.Extract) {
@@ -4492,6 +4674,14 @@ function Get-GameClientUpdateCount {
             $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
             if ($null -eq $record) { return 1 }
             if ([string]$record.ArchiveSha256 -ne [string]$Client.Archive.Sha256) { return 1 }
+            foreach ($file in @($record.Files)) { if (-not (Test-Path -LiteralPath ([string]$file.Target) -PathType Leaf)) { return 1 } }
+            return 0
+        }
+        'codhq' {
+            $record = Read-ClientRecord -GameFolder $GameFolder -ClientId $Client.Id
+            if ($null -eq $record) { return 1 }
+            if ([string]$record.ArchiveSha256 -ne ([string]$Client.Archive.Sha256).ToUpperInvariant()) { return 1 }
+            if ([int]$record.EntryCount -ne [int]$Client.ManifestCount) { return 1 }
             foreach ($file in @($record.Files)) { if (-not (Test-Path -LiteralPath ([string]$file.Target) -PathType Leaf)) { return 1 } }
             return 0
         }
@@ -8196,10 +8386,16 @@ function Update-GamesPage {
                 }
             }
             # Clients this installer once put here but no longer ships (CB's BOIII fork):
-            # only Remove is offered, so nothing of theirs is left behind.
-            foreach ($retired in @($game.RetiredClients | Where-Object { $null -ne $_ })) {
-                if (-not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $retired.Id)) { continue }
-                $null = $buttons.Children.Add((& $button "Remove $($retired.Name)" @{ Action = 'remove'; Game = $game.Id; Client = $retired.Id } 'Removes the client files this utility put in the game folder; the game itself is left alone'))
+            # their record is still in the game folder, so only Remove is offered for it,
+            # and nothing of theirs is left behind.
+            $knownClients = @($game.Clients | ForEach-Object { [string]$_.Id })
+            foreach ($recordFile in @(Get-ChildItem -LiteralPath $found.Folder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
+                $record = $null
+                try { $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json } catch { continue }
+                $recordId = [string]$record.ClientId
+                if (-not $recordId -or $recordId -in $knownClients) { continue }
+                $label = if ($record.ClientName) { [string]$record.ClientName } elseif ($recordId -eq 'boiii') { 'BOIII (CB Servers)' } else { $recordId }
+                $null = $buttons.Children.Add((& $button "Remove $label" @{ Action = 'remove'; Game = $game.Id; Client = $recordId } 'Removes the client files this utility put in the game folder; the game itself is left alone'))
             }
             if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
             foreach ($mode in $game.Modes) {

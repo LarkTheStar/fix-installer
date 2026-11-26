@@ -56,7 +56,7 @@ Order, from the least to the most involved:
 | 5 | Black Ops II campaign | T6SP-Mod | campaign starts without Plutonium |
 | 6 | MW2, MW3 campaign | IW4x, AlterWare | Spec Ops through AlterWare |
 | 7 | Advanced Warfare, Infinite Warfare, MWR | S1x, IW7-Mod, H1-Mod (CB) and H1-Mod (AuroraMod) | try both H1-Mod sources one after the other |
-| 8 | Black Ops III | CodHQ BOIII (our own build, updated from our own site; data in `%LOCALAPPDATA%\boiii`) | Install downloads our `boiii.json` and every file it lists, checks each size and SHA-1, puts `boiii.exe` in the game folder and the `data` tree in `%LOCALAPPDATA%\boiii`; Play starts it; **Check game exe** reports whether your `BlackOps3.exe` carries the PE checksum the client can load (0x6531394) and Steam's Verify restores the original; an install made by an earlier version of this utility shows **Remove BOIII (CB Servers)** |
+| 8 | Black Ops III | CodHQ BOIII (our own build, updated from our own site; data in `%LOCALAPPDATA%\boiii`) | Install downloads our `codhq-boiii.zip`, checks its pinned SHA-256, verifies all 196 files against our `boiii.json` before writing, puts `boiii.exe` in the game folder and the `data` tree in `%LOCALAPPDATA%\boiii`, then reads the install back and checks the count and every SHA-1 again; Play starts it; **Check game exe** reports whether your `BlackOps3.exe` carries the PE checksum the client can load (0x6531394) and Steam's Verify restores the original; a missing or changed file must fail with a message naming it and asking for a re-download, never count as installed; an install made by an earlier version of this utility shows **Remove BOIII (CB Servers)** |
 | 9 | Black Ops 4 | Project BO4 (Shield) | Install takes a while (about 2.2 GB through Shield's launcher); Play Online and Play Offline open Shield's launcher with your name in `project-bo4.json`; press Play Client; **Repair** if the screen stays black; Remove puts your `BlackOps4.exe` and LPC back; Battle.net Scan and Repair clean |
 | 10 | HorizonMW | HMW Launcher | Install opens the HMW Launcher: paste the MWR folder (on the clipboard), Verify game files; then **Play** on the card; Remove asks before deleting what the launcher added |
 
@@ -94,11 +94,16 @@ it by hand. **Call of Duty 2** installs two patches. **Install Custom patch v2**
 
 **Black Ops III** installs CodHQ BOIII, our own build of the community client: it is the
 only client on the card, marked Recommended, and its files come from our GitHub Pages
-(`https://larkthestar.github.io/codhq-boiii/`) and nowhere else. Install must fetch
-`boiii.json`, verify the size and SHA-1 of every entry, put `boiii.exe` in the game
-folder and the `data` tree in `%LOCALAPPDATA%\boiii`, and show the file count in the
-log. Play starts `boiii.exe` with `-launch -noupdate`; the client then updates itself
-from that same manifest. **Check game exe** reads `BlackOps3.exe` and reports its
+(`https://larkthestar.github.io/codhq-boiii/`) and nowhere else. Install downloads
+`codhq-boiii.zip`, compares its SHA-256 with the one pinned in the catalogue, and checks
+the file list in `boiii.json` from the same site: the pinned 196 entries have to be there,
+and every entry's size and SHA-1 have to match before anything is written. It then puts
+`boiii.exe` in the game folder and the `data` tree in `%LOCALAPPDATA%\boiii`, reads the
+install back, and checks the count and every SHA-1 again. A missing, changed or extra
+file must fail with a message naming that file and asking for a re-download, then a retry
+after deleting `%LOCALAPPDATA%\boiii`, and nothing that was written may stay behind: a
+partial or corrupt install never counts as installed. Play starts `boiii.exe` with
+`-launch -noupdate`; the client then updates itself from that same manifest. **Check game exe** reads `BlackOps3.exe` and reports its
 version, SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is 0x6531394
 (the dedicated server's 0x14C28B4 is not it), and a mismatch must recommend Steam's
 Verify integrity. The client never replaces the game executable: an unsupported build

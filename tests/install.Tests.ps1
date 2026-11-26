@@ -1271,13 +1271,13 @@ Describe 'Game catalogue' {
 
     It 'pins a SHA-256 for every file it downloads outside CB manifests' {
         foreach ($client in @($catalog.Clients | Where-Object { $_.Source -notin @('cb', 'manifest') })) {
-            if ($client.Extract) {
+            if ($client.Extract -or $client.Source -eq 'codhq') {
                 $archives = @(@($client.Archives) | Where-Object { $null -ne $_ })
                 if ($archives.Count -eq 0) { $archives = @($client.Archive) }
                 $archives.Count | Should -BeGreaterThan 0 -Because $client.Id
                 foreach ($archive in $archives) {
                     $archive.Url | Should -Match '^https://' -Because $client.Id
-                    $archive.Sha256 | Should -Match '^[0-9a-f]{64}$' -Because $client.Id
+                    $archive.Sha256 | Should -Match '^[0-9A-Fa-f]{64}$' -Because $client.Id
                 }
                 continue
             }
@@ -1325,16 +1325,23 @@ Describe 'Game catalogue' {
     }
 
     It 'installs our own CodHQ BOIII build from our update site, not CB''s' {
-        # Our fork's CI publishes boiii.json and the files to GitHub Pages; that client is
-        # the only one the BO3 card offers, and CB's retired entry stays only for Remove.
+        # Our fork's CI publishes one ZIP and boiii.json to GitHub Pages; that client is
+        # the only one the BO3 card offers, pinned by the SHA-256 of the whole download.
         $bo3 = Get-CatalogGame -Id 'bo3'
         @($bo3.Clients.Id) | Should -Be @('boiii-codhq')
         $client = @($bo3.Clients)[0]
-        $client.Source | Should -Be 'manifest'
+        $client.Source | Should -Be 'codhq'
         $client.Manifest | Should -Be 'boiii.json'
         $client.ManifestBase | Should -Be 'https://larkthestar.github.io/codhq-boiii/'
+        [string]$client.Archive.Url | Should -Be 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'
+        [string]$client.Archive.Sha256 | Should -Match '^[0-9A-F]{64}$'
+        [string]$client.Archive.Sha256 | Should -Be ([string]$client.Archive.Sha256).ToUpperInvariant()
+        [int64]$client.Archive.Size | Should -BeGreaterThan 1000000
+        [int]$client.ManifestCount | Should -Be 196
         $client.Recommended | Should -BeTrue
-        @($bo3.RetiredClients.Id) | Should -Be @('boiii')
+        # Nothing of CB's is in the catalogue any more: a record an older version left
+        # behind is the only thing that makes the card offer Remove for it.
+        $bo3.PSObject.Properties['RetiredClients'] | Should -BeNullOrEmpty
         @(@($bo3.Modes)[0].Clients) | Should -Be @('boiii-codhq')
         [string](@($bo3.Modes)[0].Blocked) | Should -BeNullOrEmpty
         Get-ModeBlocker -Game $bo3 -Mode @($bo3.Modes)[0] -GameFolder $TestDrive | Should -Match 'needs CodHQ BOIII'
@@ -1347,7 +1354,6 @@ Describe 'Game catalogue' {
         [int64]$bo3.ExeCheck.Checksum | Should -Be 0x6531394
         [string]::IsNullOrEmpty([string]$bo3.ExeCheck.Manifest) | Should -BeTrue
     }
-
     It 'takes a client published from its own site from that site only' {
         $client = New-CatalogClient -Id 'own-site' -Name 'Own site' -Source 'manifest' -Manifest 'boiii.json' -ManifestBase 'https://example.test/codhq/' -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*')
         $manifest = [pscustomobject]@{ Base = 'https://example.test/codhq/'; ManifestHash = ''; Entries = @(
@@ -2967,5 +2973,75 @@ Describe 'Automatic client updates' {
         Mock Get-GameClientUpdateCount { 1 }
         (Invoke-ClientAutoUpdate -GameId 'ghosts' -ClientIds @('someone-else')).Checked | Should -Be 0
         Should -Invoke Update-GameClient -Times 0
+    }
+}
+Describe 'CodHQ BOIII release' {
+    It 'matches the release published on our site, file by file' {
+        $client = @((Get-CatalogGame -Id 'bo3').Clients)[0]
+        $work = Join-Path $TestDrive ('release-' + [guid]::NewGuid().ToString('N'))
+        try {
+            $release = Get-CodhqRelease -Client $client -WorkRoot $work -RetryDelaySeconds 1
+            $release.ArchiveSha256 | Should -Be ([string]$client.Archive.Sha256).ToUpperInvariant()
+            @($release.Entries).Count | Should -Be ([int]$client.ManifestCount)
+            (Get-Item -LiteralPath $release.ZipPath).Length | Should -Be ([int64]$client.Archive.Size)
+            @(Get-ChildItem -LiteralPath $release.FilesRoot -Recurse -File).Count | Should -Be ([int]$client.ManifestCount)
+        } finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'fails when the pin, the count or an entry disagrees with the archive' {
+        $source = Join-Path $TestDrive 'codhq-source'
+        $null = New-Item -ItemType Directory -Path (Join-Path $source 'data') -Force
+        [IO.File]::WriteAllText((Join-Path $source 'boiii.exe'), 'exe')
+        [IO.File]::WriteAllText((Join-Path $source 'data/a.txt'), 'alpha')
+        [IO.File]::WriteAllText((Join-Path $source 'data/b.txt'), 'bravo')
+        $zip = Join-Path $TestDrive 'codhq-release.zip'
+        Compress-Archive -Path (Join-Path $source '*') -DestinationPath $zip
+        $entries = @('boiii.exe', 'data/a.txt', 'data/b.txt') | ForEach-Object {
+            $full = Join-Path $source ($_ -replace '/', '\')
+            [pscustomobject]@{ Path = $_; Size = (Get-Item -LiteralPath $full).Length; Sha1 = (Get-FileSha1Hex $full); Dest = '' }
+        }
+        $client = New-CatalogClient -Id 'tamper' -Name 'Tamper' -Source 'codhq' -ManifestCount 3
+        { Test-CodhqArchiveEntries -Client $client -ZipPath $zip -Entries $entries -FilesRoot (Join-Path $TestDrive 'checked') } | Should -Not -Throw
+
+        $altered = @($entries | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = $_.Size; Sha1 = $_.Sha1; Dest = '' } })
+        $altered[1].Sha1 = '0' * 40
+        { Test-CodhqArchiveEntries -Client $client -ZipPath $zip -Entries $altered -FilesRoot (Join-Path $TestDrive 'bad-sha1') } | Should -Throw '*has SHA-1*'
+
+        $missing = @($entries[0], [pscustomobject]@{ Path = 'data/missing.txt'; Size = 1; Sha1 = ('A' * 40); Dest = '' }, $entries[2])
+        { Test-CodhqArchiveEntries -Client $client -ZipPath $zip -Entries $missing -FilesRoot (Join-Path $TestDrive 'bad-missing') } | Should -Throw '*does not contain data/missing.txt*'
+
+        $wrongSize = @($entries | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = [int64]($_.Size + 1); Sha1 = $_.Sha1; Dest = '' } })
+        { Test-CodhqArchiveEntries -Client $client -ZipPath $zip -Entries $wrongSize -FilesRoot (Join-Path $TestDrive 'bad-size') } | Should -Throw '*bytes, but its manifest says*'
+
+        $wrongCount = New-CatalogClient -Id 'tamper' -Name 'Tamper' -Source 'codhq' -ManifestCount 4
+        { Test-CodhqArchiveEntries -Client $wrongCount -ZipPath $zip -Entries $entries -FilesRoot (Join-Path $TestDrive 'bad-count') } | Should -Throw '*expects 4*'
+
+        # A pin that is not a SHA-256, or one that disagrees with the download, never
+        # passes for an install.
+        $badPin = New-CatalogClient -Id 'tamper' -Name 'Tamper' -Source 'codhq' -ManifestCount 3 -Archive @{ Url = 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'; Size = 1; Sha256 = 'nope' }
+        { Get-CodhqRelease -Client $badPin -WorkRoot (Join-Path $TestDrive 'bad-pin') } | Should -Throw '*not a SHA-256*'
+    }
+    It 'rejects an installed file that does not match, naming it' {
+        $sandbox = Join-Path $TestDrive 'codhq-sandbox'
+        $game = Join-Path $sandbox 'game'
+        $null = New-Item -ItemType Directory -Path $game -Force
+        $global:SandboxRoot = $sandbox
+        try {
+            $client = New-CatalogClient -Id 'check' -Name 'Check' -Source 'codhq' -ManifestCount 2 -AppData 'boiii' -GameFiles @('boiii.exe')
+            [IO.File]::WriteAllText((Join-Path $game 'boiii.exe'), 'exe')
+            $appData = Join-Path $sandbox 'AppData\boiii'
+            $null = New-Item -ItemType Directory -Path (Join-Path $appData 'data') -Force
+            [IO.File]::WriteAllText((Join-Path $appData 'data\a.txt'), 'alpha')
+            $entries = @(
+                [pscustomobject]@{ Path = 'boiii.exe'; Size = 3; Sha1 = (Get-FileSha1Hex (Join-Path $game 'boiii.exe')); Dest = '' },
+                [pscustomobject]@{ Path = 'data/a.txt'; Size = 5; Sha1 = (Get-FileSha1Hex (Join-Path $appData 'data\a.txt')); Dest = '' })
+            { Assert-CodhqInstalled -Client $client -Entries $entries -GameFolder $game } | Should -Not -Throw
+            [IO.File]::WriteAllText((Join-Path $appData 'data\a.txt'), 'ALPHA')
+            { Assert-CodhqInstalled -Client $client -Entries $entries -GameFolder $game } | Should -Throw '*data/a.txt*SHA-1*'
+            Remove-Item -LiteralPath (Join-Path $game 'boiii.exe') -Force
+            { Assert-CodhqInstalled -Client $client -Entries $entries -GameFolder $game } | Should -Throw '*boiii.exe is missing*'
+        } finally { $global:SandboxRoot = '' }
     }
 }
