@@ -2882,7 +2882,7 @@ function Get-GameCatalog {
             # to it as mss32_original.dll; its manual stays in the ZIP.
             Clients = @(
                 (New-CatalogClient -Id 'cod2-v2' -Name 'Custom patch v2' -Source 'archive' -Extract $true -RequiredFiles @('steam.dll', 'cod2patch.ini') -ArchiveItems @(@{ From = 'steam/steam.dll'; To = 'steam.dll' }, @{ From = 'steam/cod2patch.ini'; To = 'cod2patch.ini' }) -Description 'Takes steam.dll and cod2patch.ini out of the patch''s steam folder and copies them into the game folder; the retail folder and Info.txt stay in the ZIP.' -Archive @{
-                    Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD2_CustomPatchv2.zip'
+                    Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/cod2/CoD2_CustomPatchv2.zip'
                     Size = 108810
                     Sha256 = '6afdb9ce6072ffbbe682282a13026bc72012331f0dafde1bc62a37b2cbc96ddd' }),
                 (New-CatalogClient -Id 'cod2x' -Name 'CoD2x' -Source 'archive' -Extract $true -Requires @('cod2-v2') -RequiredFiles @('mss32.dll', 'mss32_original.dll') -ArchiveItems @(@{ From = 'mss32.dll'; To = 'mss32.dll' }, @{ From = 'mss32_original.dll'; To = 'mss32_original.dll' }) -Description 'Copies CoD2x''s mss32.dll and mss32_original.dll into the game folder; the manual in the ZIP is not needed.' -Archive @{

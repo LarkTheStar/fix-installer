@@ -1867,7 +1867,7 @@ Describe 'Call of Duty 2 patches' {
         $patch = $game.Clients[0]
         $patch.Source | Should -Be 'archive'
         $patch.Extract | Should -BeTrue
-        $patch.Archive.Url | Should -Be 'https://github.com/LarkTheStar/fix-installer/releases/download/1.1/CoD2_CustomPatchv2.zip'
+        $patch.Archive.Url | Should -Be 'https://github.com/LarkTheStar/fix-installer/releases/download/cod2/CoD2_CustomPatchv2.zip'
         $patch.Archive.Size | Should -Be 108810
         $patch.Archive.Sha256 | Should -Be '6afdb9ce6072ffbbe682282a13026bc72012331f0dafde1bc62a37b2cbc96ddd'
         @($patch.ArchiveItems | ForEach-Object { "$($_.From)>$($_.To)" }) | Should -Be @('steam/steam.dll>steam.dll', 'steam/cod2patch.ini>cod2patch.ini')
