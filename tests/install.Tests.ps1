@@ -1270,7 +1270,7 @@ Describe 'Game catalogue' {
     }
 
     It 'pins a SHA-256 for every file it downloads outside CB manifests' {
-        foreach ($client in @($catalog.Clients | Where-Object { $_.Source -ne 'cb' })) {
+        foreach ($client in @($catalog.Clients | Where-Object { $_.Source -notin @('cb', 'manifest') })) {
             if ($client.Extract) {
                 $archives = @(@($client.Archives) | Where-Object { $null -ne $_ })
                 if ($archives.Count -eq 0) { $archives = @($client.Archive) }
@@ -1324,18 +1324,40 @@ Describe 'Game catalogue' {
         }
     }
 
-    It 'leaves Black Ops III without a client until the CodHQ build exists' {
-        # CB's BOIII fork carries CB's own patches, so it is not shipped: the card has no
-        # client at all until our own fork has a release, and Play says why.
+    It 'installs our own CodHQ BOIII build from our update site, not CB''s' {
+        # Our fork's CI publishes boiii.json and the files to GitHub Pages; that client is
+        # the only one the BO3 card offers, and CB's retired entry stays only for Remove.
         $bo3 = Get-CatalogGame -Id 'bo3'
-        @($bo3.Clients).Count | Should -Be 0
+        @($bo3.Clients.Id) | Should -Be @('boiii-codhq')
+        $client = @($bo3.Clients)[0]
+        $client.Source | Should -Be 'manifest'
+        $client.Manifest | Should -Be 'boiii.json'
+        $client.ManifestBase | Should -Be 'https://larkthestar.github.io/codhq-boiii/'
+        $client.Recommended | Should -BeTrue
         @($bo3.RetiredClients.Id) | Should -Be @('boiii')
-        @($bo3.Modes)[0].Clients.Count | Should -Be 0
-        Get-ModeBlocker -Game $bo3 -Mode @($bo3.Modes)[0] -GameFolder $TestDrive | Should -Match 'in development'
+        @(@($bo3.Modes)[0].Clients) | Should -Be @('boiii-codhq')
+        [string](@($bo3.Modes)[0].Blocked) | Should -BeNullOrEmpty
+        Get-ModeBlocker -Game $bo3 -Mode @($bo3.Modes)[0] -GameFolder $TestDrive | Should -Match 'needs CodHQ BOIII'
+        # The executable goes into the game folder; the data tree goes to AppData\boiii,
+        # where the client reads it.
+        (Resolve-ClientTarget -Client $client -Path 'boiii.exe' -GameFolder $TestDrive).Dest | Should -Be 'game'
+        (Resolve-ClientTarget -Client $client -Path 'data/main/zone/all_mp.ff' -GameFolder $TestDrive).Dest | Should -Be 'appdata'
         # The game executable is pinned by the PE header checksum the client compares,
         # with no CB manifest behind it.
         [int64]$bo3.ExeCheck.Checksum | Should -Be 0x6531394
         [string]::IsNullOrEmpty([string]$bo3.ExeCheck.Manifest) | Should -BeTrue
+    }
+
+    It 'takes a client published from its own site from that site only' {
+        $client = New-CatalogClient -Id 'own-site' -Name 'Own site' -Source 'manifest' -Manifest 'boiii.json' -ManifestBase 'https://example.test/codhq/' -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*')
+        $manifest = [pscustomobject]@{ Base = 'https://example.test/codhq/'; ManifestHash = ''; Entries = @(
+            [pscustomobject]@{ Path = 'boiii.exe'; Size = 10; Sha1 = ('A' * 40); Dest = '' },
+            [pscustomobject]@{ Path = 'data/main/x.txt'; Size = 4; Sha1 = ('B' * 40); Dest = '' }) }
+        $plan = Get-ClientInstallPlan -Client $client -GameFolder $TestDrive -Manifest $manifest
+        $plan.Base | Should -Be 'https://example.test/codhq/'
+        $plan.Steps[0].Target | Should -Be (Join-Path $TestDrive 'boiii.exe')
+        $plan.Steps[1].Dest | Should -Be 'appdata'
+        $plan.Steps[1].Url | Should -Match '^https://example\.test/codhq/data/main/x\.txt\?B+$'
     }
 
     It 'names only its own clients as conflicts' {

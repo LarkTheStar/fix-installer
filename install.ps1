@@ -2717,6 +2717,8 @@ function Invoke-SteamDowngrade {
 #   Derive - a denied name the client needs, made from the player's own file when its
 #            SHA-1 matches the manifest (for example miles32.dll from mss32.dll).
 # Source 'cb' clients come from CB's public updater repository (CDN mirror, then
+# GitHub). Source 'manifest' clients publish the same [path, size, sha1] manifest from a
+# site of their own (ManifestBase), which is how the clients we build ourselves update.
 # GitHub); 'github' clients from the project's own release, pinned by SHA-256;
 # 'plutonium' from Plutonium's own server.
 
@@ -2724,6 +2726,9 @@ function New-CatalogClient {
     param(
         [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Name, [string]$Source = 'cb',
         [string]$Manifest = '', [string]$Folder = '', [string[]]$Allow = @(), [string[]]$Deny = @(),
+        # Where a 'manifest' client publishes its manifest and files (the base the paths in
+        # the manifest are relative to). Its own site replaces CB's mirrors for that client.
+        [string]$ManifestBase = '',
         [hashtable]$Derive = @{}, [string]$AppData = '', [string[]]$GameFiles = @(), [object[]]$Assets = @(),
         # GitHub release the assets come from, for update checks.
         [string]$ReleaseRepo = '', [string]$ReleaseTag = '',
@@ -2763,7 +2768,7 @@ function New-CatalogClient {
         # key and the game's path into each .reg and has the registry editor add it.
         $ServerKey = @()
     )
-    [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
+    [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; ManifestBase = $ManifestBase; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
         Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description; Recommended = [bool]$Recommended
@@ -2976,19 +2981,19 @@ function Get-GameCatalog {
         [pscustomobject]@{ Id = 'bo3'; Name = 'Call of Duty: Black Ops III'; Year = '2015'; SteamAppIds = @(311210); Detect = 'steam'
             ValidFiles = @('BlackOps3.exe'); NameArgument = '-name'; DefaultArguments = '-launch -noupdate'
             NeedsElevation = $false; DpiFix = @(); CdKey = ''; PlutoniumKey = ''; ProjectUrl = ''
-            # CB's BOIII fork is no longer installed: it is CB's own build with CB's own
-            # patches, and this utility ships only what the community at large publishes or
-            # what we build ourselves. Our own client (built from our fork) takes its place
-            # once it has a release. Until then the player's own game executable can still
-            # be checked: the client loads into the build whose PE header checksum is
-            # 0x6531394 and never replaces it.
+            # CB's BOIII fork is not offered: it is CB's own build with CB's own patches.
+            # Our own client replaces it: built from our fork (LarkTheStar/codhq-boiii) by
+            # its CI, which publishes boiii.exe, the whole data tree and boiii.json to our
+            # GitHub Pages, so the client updates from our site and not from CB's mirrors.
+            # It loads into the build whose PE header checksum is 0x6531394 and never
+            # replaces the game executable.
             ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Checksum = 0x6531394; Manifest = ''; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files.' }
-            Clients = @()
+            Clients = @((New-CatalogClient -Id 'boiii-codhq' -Name 'CodHQ BOIII' -Source 'manifest' -Manifest 'boiii.json' -ManifestBase 'https://larkthestar.github.io/codhq-boiii/' -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Description 'Built from our own fork; updates from our own site and runs your own BlackOps3.exe.' -Recommended))
             # What earlier versions of this utility installed for this game. Nothing is
             # offered from them any more; Remove still takes the files away.
             RetiredClients = @([pscustomobject]@{ Id = 'boiii'; Name = 'BOIII (CB Servers)' })
-            Note = 'The CodHQ BOIII client is in development: built from our own fork, updated from our own site, and it runs your own BlackOps3.exe without replacing it. The game executable has to be the build the client supports; Steam''s Verify integrity restores the original.'
-            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Blocked 'The CodHQ BOIII client is in development; Play appears once its first release is out.'))
+            Note = 'CodHQ BOIII is our own build of the community client, updated from our own site. It runs your own BlackOps3.exe and never replaces it, so the game executable has to be the build it supports; Steam''s Verify integrity restores the original.'
+            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii-codhq')))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'iw'; Name = 'Call of Duty: Infinite Warfare'; Year = '2016'; SteamAppIds = @(292730); Detect = 'steam'
             ValidFiles = @('iw7_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
@@ -3449,8 +3454,14 @@ function Get-ClientInstallPlan {
           [switch]$Latest)
     $steps = [System.Collections.Generic.List[object]]::new()
     $manifestHash = ''; $base = ''; $releaseTag = [string]$Client.ReleaseTag
-    if ($Client.Source -eq 'cb') {
-        if ($null -eq $Manifest) { $Manifest = Get-ClientManifest -Manifest $Client.Manifest }
+    $manifestSource = $Client.Source -eq 'cb' -or $Client.Source -eq 'manifest'
+    if ($manifestSource) {
+        if ($null -eq $Manifest) {
+            # A 'manifest' client publishes from its own site only; CB's mirrors are never
+            # asked for a build they do not have.
+            $bases = if ($Client.Source -eq 'manifest' -and $Client.ManifestBase) { @([string]$Client.ManifestBase) } else { @(Get-ClientUpdateSource) }
+            $Manifest = Get-ClientManifest -Manifest $Client.Manifest -Bases $bases
+        }
         $manifestHash = $Manifest.ManifestHash; $base = $Manifest.Base
         $entries = @($Manifest.Entries | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Size = $_.Size; Sha1 = $_.Sha1; Sha256 = ''; Dest = $_.Dest; Url = ''; Asset = $null } })
     } else {
@@ -3494,7 +3505,7 @@ function Get-ClientInstallPlan {
                     $current = if ($entry.Sha1) { (Get-FileSha1Hex $target.Target) -eq $entry.Sha1 } else { (Get-FileSha256 -Path $target.Target) -eq $entry.Sha256 }
                 }
                 $step.Action = if ($current) { 'current' } else { 'download' }
-                if ($Client.Source -eq 'cb') { $step.Url = $base + $Client.Folder + ((($entry.Path -split '/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/') + '?' + $entry.Sha1 }
+                if ($manifestSource) { $step.Url = $base + $Client.Folder + ((($entry.Path -split '/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/') + '?' + $entry.Sha1 }
             }
         }
         $steps.Add($step)
@@ -3515,13 +3526,13 @@ function Save-ClientFile {
         Write-Progress -Activity "Downloading $($Plan.Client.Name)" -Completed
         return $result
     }
-    if ($Plan.Client.Source -ne 'cb') {
+    if ($Plan.Client.Source -notin @('cb', 'manifest')) {
         $result = Invoke-ResumableDownload -Url $Step.Url -Destination $StagePath -Label $label -ExpectedSha256 $Step.Sha256 -RetryDelaySeconds $RetryDelaySeconds -PassThru
         Write-Progress -Activity $label -Completed
         return $result
     }
     $relativeUrl = $Plan.Client.Folder + ((($Step.Path -split '/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/') + '?' + $Step.Sha1
-    $bases = @($Plan.Base) + @(Get-ClientUpdateSource | Where-Object { $_ -ne $Plan.Base })
+    $bases = if ($Plan.Client.Source -eq 'manifest') { @($Plan.Base) } else { @($Plan.Base) + @(Get-ClientUpdateSource | Where-Object { $_ -ne $Plan.Base }) }
     $lastError = $null
     foreach ($base in $bases) {
         try {
