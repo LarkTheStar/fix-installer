@@ -1891,6 +1891,9 @@ Describe 'Call of Duty 2 patches' {
         $cod2x.Archive.Sha256 | Should -Be 'c33f52037e67eaa948746a93967d27d8c70ab58623abab48d07803600a6a8555'
         @($cod2x.ArchiveItems | ForEach-Object { $_.To }) | Should -Be @('mss32.dll', 'mss32_original.dll')
         @($cod2x.Requires) | Should -Be @('cod2-v2')
+        # The card recommends CoD2x, the layer worth adding, not the required patch.
+        $cod2x.Recommended | Should -BeTrue
+        $patch.Recommended | Should -BeFalse
         # Every mode plays with the custom patch alone: CoD2x only enhances it, so no Play
         # button waits for it.
         foreach ($mode in $game.Modes) { @($mode.Clients) | Should -Be @('cod2-v2') }

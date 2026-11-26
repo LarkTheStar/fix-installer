@@ -90,7 +90,7 @@ editor asks once per file, and a prompt that is cancelled leaves
 whole flow again if a download fails; when the page holds no key that can be read, the
 `.reg` is still in `key\` with its path, drive and version filled in, and the log says what
 to put in
-it by hand. **Call of Duty 2** installs two patches. **Install Custom patch v2** copies only `steam.dll` and `cod2patch.ini` out of the ZIP's `steam` folder (the `retail` folder and `Info.txt` stay in it), then **Install CoD2x** copies `mss32.dll` and `mss32_original.dll` in. Play must start `CoD2SP_s.exe` and `CoD2MP_s.exe` with the custom patch alone: CoD2x only enhances it, so neither Play button may wait for it. Remove must take CoD2x away first, put the retail `mss32.dll` back and then delete the patch's two files.
+it by hand. **Call of Duty 2** installs two patches. **Install Custom patch v2** copies only `steam.dll` and `cod2patch.ini` out of the ZIP's `steam` folder (the `retail` folder and `Info.txt` stay in it), then **Install CoD2x** copies `mss32.dll` and `mss32_original.dll` in. Play must start `CoD2SP_s.exe` and `CoD2MP_s.exe` with the custom patch alone: CoD2x only enhances it, so neither Play button may wait for it, and CoD2x carries `(Recommended)` on its status line and its install button. Remove must take CoD2x away first, put the retail `mss32.dll` back and then delete the patch's two files.
 
 ## When something fails
 

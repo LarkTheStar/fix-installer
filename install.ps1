@@ -2754,6 +2754,9 @@ function New-CatalogClient {
         # Only these entries of the archive are installed, each at its own path in the game
         # folder, as From/To pairs; the rest of the ZIP is left in it.
         [object[]]$ArchiveItems = @(),
+        # Marked "(Recommended)" on the card and its install button: the layer that is worth
+        # having even though the game plays without it.
+        [switch]$Recommended,
         # The registry files the client's own servers ask for, each with the key that goes
         # in it: the .reg its site publishes, the page that hands a personal key out (or
         # one key for everybody), and the name the file uses for the key. Install fills the
@@ -2763,7 +2766,7 @@ function New-CatalogClient {
     [pscustomobject]@{ Id = $Id; Name = $Name; Source = $Source; Manifest = $Manifest; Folder = $Folder; Allow = @($Allow); Deny = @($Deny)
         Derive = $Derive; AppData = $AppData; GameFiles = @($GameFiles); Assets = @($Assets)
         ReleaseRepo = $ReleaseRepo; ReleaseTag = $ReleaseTag; Conflicts = @($Conflicts)
-        Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description
+        Protect = @($Protect); Watch = @($Watch); ConfirmCleanup = $ConfirmCleanup; Description = $Description; Recommended = [bool]$Recommended
         Archive = $Archive; Extract = $Extract; Requires = @($Requires); RequiredFiles = @($RequiredFiles)
         CleanInstall = $CleanInstall; KeepFiles = @($KeepFiles); Archives = @($Archives); ArchiveItems = @($ArchiveItems)
         ServerKey = @(@($ServerKey) | Where-Object { $null -ne $_ }) }
@@ -2901,7 +2904,7 @@ function Get-GameCatalog {
                     Url = 'https://github.com/LarkTheStar/fix-installer/releases/download/cod2/CoD2_CustomPatchv2.zip'
                     Size = 108810
                     Sha256 = '6afdb9ce6072ffbbe682282a13026bc72012331f0dafde1bc62a37b2cbc96ddd' }),
-                (New-CatalogClient -Id 'cod2x' -Name 'CoD2x' -Source 'archive' -Extract $true -Requires @('cod2-v2') -RequiredFiles @('mss32.dll', 'mss32_original.dll') -ArchiveItems @(@{ From = 'mss32.dll'; To = 'mss32.dll' }, @{ From = 'mss32_original.dll'; To = 'mss32_original.dll' }) -Description 'Copies CoD2x''s mss32.dll and mss32_original.dll into the game folder; the manual in the ZIP is not needed.' -Archive @{
+                (New-CatalogClient -Id 'cod2x' -Name 'CoD2x' -Source 'archive' -Extract $true -Requires @('cod2-v2') -RequiredFiles @('mss32.dll', 'mss32_original.dll') -ArchiveItems @(@{ From = 'mss32.dll'; To = 'mss32.dll' }, @{ From = 'mss32_original.dll'; To = 'mss32_original.dll' }) -Description 'Copies CoD2x''s mss32.dll and mss32_original.dll into the game folder; the manual in the ZIP is not needed.' -Recommended -Archive @{
                     Url = 'https://github.com/callofduty2x/CoD2x/releases/download/v1.4.6.8/CoD2x_1.4.6.8_windows.zip'
                     Size = 2577745
                     Sha256 = 'c33f52037e67eaa948746a93967d27d8c70ab58623abab48d07803600a6a8555' }))
@@ -8093,7 +8096,8 @@ function Update-GamesPage {
                 $isIn = Test-GameClientInstalled -GameFolder $found.Folder -ClientId $client.Id
                 $count = $global:GameUpdateCounts[$game.Id + '|' + $client.Id]
                 $status = if (-not $isIn) { 'not installed' } elseif ($null -eq $count) { 'installed' } elseif ($count -gt 0) { 'installed, update available' } else { 'installed, up to date' }
-                $line = & $text ("{0}: {1}" -f $client.Name, $status) $(if ($isIn) { 'Green' } else { 'TextMuted' }) 12; $line.Margin = '0,3,0,0'; $null = $panel.Children.Add($line)
+                $clientLabel = if ($client.Recommended) { "$($client.Name) (Recommended)" } else { $client.Name }
+                $line = & $text ("{0}: {1}" -f $clientLabel, $status) $(if ($isIn) { 'Green' } else { 'TextMuted' }) 12; $line.Margin = '0,3,0,0'; $null = $panel.Children.Add($line)
             }
         }
         if (-not $game.Available) { $line = & $text $game.UnavailableReason 'Yellow' 12; $line.Margin = '0,6,0,0'; $null = $panel.Children.Add($line) }
@@ -8127,7 +8131,8 @@ function Update-GamesPage {
                     $conflict = @($client.Conflicts | Where-Object { Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_ }) | Select-Object -First 1
                     $need = @($client.Requires | Where-Object { -not (Test-GameClientInstalled -GameFolder $found.Folder -ClientId $_) }) | Select-Object -First 1
                     $tip = if ($conflict) { "Remove $(Get-CatalogClientName $conflict) first: both replace the same files." } elseif ($need) { "Install $(Get-CatalogClientName $need $game) first: this goes on top of it." } elseif ($client.Description) { $client.Description } else { '' }
-                    $null = $buttons.Children.Add((& $button "Install $($client.Name)" @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict -and -not $need)))
+                    $installLabel = if ($client.Recommended) { "Install $($client.Name) (Recommended)" } else { "Install $($client.Name)" }
+                    $null = $buttons.Children.Add((& $button $installLabel @{ Action = 'install'; Game = $game.Id; Client = $client.Id } $tip (-not $conflict -and -not $need)))
                 }
             }
             if (@($game.Clients | Where-Object { $_.Id -eq 'plutonium' }).Count -gt 0) { $null = $buttons.Children.Add((& $button 'Plutonium login' @{ Action = 'plutologin'; Game = $game.Id } 'Open Plutonium to sign in')) }
