@@ -108,7 +108,17 @@ writes (its `-Check` form, which the daily workflow runs, must report that the p
 the site agree), then install and update once from the card: the client replaces
 `boiii.exe` from `boiii.json`, keeps its `data` tree current even with `-noupdate`, and
 the install must still end with the pinned count and every SHA-1 matching. Play starts `boiii.exe` with
-`-launch -noupdate`, the same start its own Play button gives, and **Open BOIII launcher** starts the same `boiii.exe` with no arguments so the first run can set the player name, the launch options and the patches. The name is kept in the client's own profile: neither button passes it on the command line, because the client has no `-name` argument. The card says the launcher has to be opened once. The client then updates itself from that same manifest. **Check game exe** reads `BlackOps3.exe` and reports its
+`-launch -noupdate`, the same start its own Play button gives, and **Open BOIII launcher** starts the same `boiii.exe` with no arguments so the first run can set the player name, the launch options and the patches. The name is kept in the client's own profile: neither button passes it on the command line, because the client has no `-name` argument. The card says the launcher has to be opened once. The client then updates itself from that same manifest.
+
+The version selector under Play lists the releases this fork publishes
+(`v3.1.0-codhq.1`, `v3.1.0-codhq.2`, …) from the site's `versions.json`, so it can
+never name another fork's build: picking an older one downloads it to `versions/`
+beside the game and starts it with `-noupdate`, while the client's own `data` tree
+keeps updating. "Builds from the original creator…" lists Ezz's releases from his
+GitHub separately; one of those runs untouched and freezes every update until a
+CodHQ build is picked again.
+
+**Check game exe** reads `BlackOps3.exe` and reports its
 version, SHA-1, SHA-256 and PE checksum; the build a BOIII client can load is the
 executable released Sept 10, 2026 with PE checksum 0x6531394 (the dedicated server's
 0x14C28B4 is not it), and a mismatch must recommend Steam's Verify integrity. The
