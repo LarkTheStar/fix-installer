@@ -44,15 +44,7 @@ ship Multiplayer content: the data is Steam's and the pack is free there.
 | Upstream sync fetched upstream's *tag* named `main` | Full refspec for `refs/heads/main` | The nightly merge silently stops finding upstream |
 | Ezz build selected, then updated with our data | An `ezz:` selection skips **all** updates and logs why | Version mixing crashes |
 | Dead tag `v3.1.0-codhq.9` on a commit that never built | Tag deleted locally and on `origin`; nothing referenced it | Do not reuse the number; fix forward with a new tag |
-
-### `versions.json` is not sorted by release number
-
-The list is written in the order the GitHub releases API returns, which is by
-*release record creation time*, and `v3.1.0-codhq.10`'s record was created before
-most of the others. It therefore appears near the bottom of the selector instead
-of second. Nothing is broken (the builds are the right builds), but the order is
-wrong. A fix is to sort by the numeric suffix in `pages.yml` before writing the
-file; it was not done because it changes the publishing workflow.
+| `versions.json` listed `.10` near the bottom of the selector | `pages.yml` sorts by the numeric version ([client build], then `codhq.<n>`) before writing the file | The releases API returns record creation order, which is not version order |
 
 ### The installer record lags after a client self-update
 

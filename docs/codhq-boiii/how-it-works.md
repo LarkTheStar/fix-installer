@@ -74,7 +74,8 @@ happen.
    `codhq-boiii.zip` attached, and `--generate-notes`.
 7. Write `site/versions.json` from our releases that actually carry a
    `boiii.exe` asset — so the launcher's version list can never offer a dead
-   download, and can never list Ezz's releases.
+   download, and can never list Ezz's releases — and sort it newest first by
+   version number (client build, then `codhq.<n>`), not by release-record date.
 8. Publish `site/` to `gh-pages` with peaceiris/actions-gh-pages.
 
 ## The installer side

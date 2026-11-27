@@ -16,7 +16,8 @@ Windows needs numbers there.
 
 Every `v*` tag triggers `pages.yml`, which builds the tag, publishes the site,
 attaches `boiii.exe` + `codhq-boiii.zip` to a GitHub release, and rewrites
-`versions.json` from the releases that really carry an `boiii.exe` asset. A tag
+`versions.json` from the releases that really carry an `boiii.exe` asset,
+newest first by version number. A tag
 therefore *is* a release; a tag whose build fails produces no release and no
 manifest entry.
 
