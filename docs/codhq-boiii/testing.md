@@ -40,14 +40,44 @@ If `map mp_rise` instead reaches the engine's fast-file loader, the guard did
 not fire — check that the `map`/`devmap` command wrap is installed, not the
 `Cmd_ExecuteSingleCommand` detour (that detour never fires on this engine build;
 it was removed for exactly that reason).
+## What a good run looked like
 
-## What a good run looked like (`v3.1.0-codhq.11`, local build)
+### Installed `v3.1.0-codhq.11`, launched from the game folder
+
+Launched as a player would (`./boiii.exe -launch`, updater **on**, so a downgrade
+would have shown up):
+
+- The client's own console window title read
+  `CodHQ BOIII V3.1.0-codhq.11 - Console` — that string comes from
+  `SHORTVERSION`, so it is the build introducing itself, not a file we hashed.
+- The executable still reported `3.1.0.3340` afterwards and its SHA-256 was
+  unchanged (`49f9c7da…`), so the updater found nothing to replace: no
+  updater-driven downgrade.
+- The console opened by itself at startup and printed the startup pack warning:
+  `[ Multiplayer ] The Multiplayer pack is not installed in …\zone: there is no mp_common or mp_patch fast file in it, so joining a server cannot work.`
+- `]map mp_rise` →
+  `[ 75579][         ]  [Com] Black Ops III's Multiplayer data is not installed here, so 'mp_common' cannot be loaded: there is no zone/mp_common.ff or zone/mp_common.xpak in the game folder.`
+  Process stayed alive; no new dump.
+- `]connect 45.11.18.111:27019` →
+  `[ 116748][         ]  [Party] Black Ops III's Multiplayer data is not installed here, so 'mp_common' cannot be loaded: …`
+  — the `[Party]` refusal, printed before any Workshop check. Process stayed
+  alive.
+- `]quit` exited cleanly; the dump folder was byte-identical before and after
+  (newest still `codhq-crash-2026-11-27-19-06-34.zip`).
+
+That single run proves all three release claims: the version string, the trimmed
+`[Com]` guard on the `map` command wrap, and the `[Party]` refusal on the join
+path.
+
+### Earlier local build
 
 - `]map mp_rise` → `[Com] … mp_common …`, process alive.
-- `]connect 45.11.18.111:27019` → `[Party] …`, process alive.
-- `quit` exited cleanly.
-- No new dump: the newest `codhq-crash-*.zip` was from an earlier session, and
-  the dump folder listing was identical before and after.
+- `]connect …` → `[Party] …`, process alive.
+- `quit` exited cleanly, no new dump.
+
+The console does not print a version banner of its own; the version is in the
+window title and in the PE (`FileVersion`, `ProductName`), which is why the title
+is read rather than the scrollback.
 
 ## Console automation
 

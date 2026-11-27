@@ -33,6 +33,15 @@ says out loud which client build a download sits on.
 | [testing.md](testing.md) | How to prove a build on a real install, and what "passing" looked like |
 | [known-issues.md](known-issues.md) | Open problems, and what was never verified |
 
+## Current state
+
+`v3.1.0-codhq.11` is published, pinned in `install.ps1`, and installed in the
+game folder (executable `3.1.0.3340`, SHA-256 `49f9c7da…`). It was launched from
+that folder and reported `CodHQ BOIII V3.1.0-codhq.11` in its own console title,
+with the `[Com]` level guard and the `[Party]` join refusal both observed. The
+install has no Steam Multiplayer/Zombies DLC, so a successful join remains
+untested — see [testing.md](testing.md).
+
 ## Short version of the history
 
 1. Started as a rebrand of Ezz's client: our name, our version line, our icon.

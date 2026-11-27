@@ -22,10 +22,10 @@ covered even though the UI is not.
 
 ### A completed join and gameplay were never observed
 
-`connect` against a live server (`45.11.18.111:27019`, 14-player TDM) now ends in
-the CodHQ missing-pack refusal — which is the correct outcome *for this install*,
-because the map cannot load without the pack. Whether a join completes, loads
-the map and plays is unverified.
+`connect` against a live server (`45.11.18.111:27019`, 14-player TDM) ends in the
+CodHQ `[Party]` missing-pack refusal — the correct outcome *for this install*,
+because the map cannot load without the pack. Verified on the shipped `.11`
+build. Whether a join completes, loads the map and plays is unverified.
 
 ### The missing-pack explanation cannot fix the install
 
@@ -54,12 +54,19 @@ of second. Nothing is broken (the builds are the right builds), but the order is
 wrong. A fix is to sort by the numeric suffix in `pages.yml` before writing the
 file; it was not done because it changes the publishing workflow.
 
-### The installer record lags one release behind after the client self-updates
+### The installer record lags after a client self-update
 
 `.codhq-client-boiii-codhq.json` records the build the installer wrote. When the
 client updates itself on start, the record still names the previous archive —
 which `Get-GameClientUpdateCount` reads as "an update is available" and repairs
-on the next install. That is the intended behaviour, not damage.
+on the next install. That is intended behaviour, not damage.
+
+For the `.11` install the record was reconciled by hand instead
+(`Size`/`Sha1`/`Sha256` of `boiii.exe` recomputed from disk, `ArchiveSha256` set
+to the pinned archive, `InstalledAt` refreshed), so the game folder's record and
+the installed release agree and the installer computes `update needed: False`.
+Only the `boiii.exe` entry differed; all 195 data entries were already correct,
+because `.11` changed C++ only. A fresh install or repair does the same job.
 
 ## Sharp edges worth remembering
 
