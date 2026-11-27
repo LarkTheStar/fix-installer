@@ -2993,10 +2993,15 @@ function Get-GameCatalog {
             # checksum is 0x6531394 and never replaces the game executable.
             ExeCheck = [pscustomobject]@{ File = 'BlackOps3.exe'; Checksum = 0x6531394; Manifest = ''; Repair = 'In Steam: right-click Black Ops III > Properties > Installed Files > Verify integrity of game files. The client can also install the compatible BlackOps3.exe for you (Settings => Patches) and keeps your file as BlackOps3.exe.boiii_backup.' }
             Clients = @((New-CatalogClient -Id 'boiii-codhq' -Name 'CodHQ BOIII' -Source 'codhq' -Manifest 'boiii.json' -ManifestBase 'https://larkthestar.github.io/codhq-boiii/' `
-                -Archive @{ Url = 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'; Size = 7385589; Sha256 = 'AC66B5DB91B8D7768BBA683C62EFB2269D00390EFAC8977C1329D468F809A512' } `
+                -Archive @{ Url = 'https://larkthestar.github.io/codhq-boiii/codhq-boiii.zip'; Size = 7453139; Sha256 = '8224CDFC8163597407522C0C3BB318BA2B61F8AA2B684D3E1D41AC412533013E' } `
                 -ManifestCount 196 -AppData 'boiii' -GameFiles @('boiii.exe') -Allow @('boiii.exe', 'data/*') -Description 'Our own build, pinned by SHA-256 and verified file by file against our published manifest; updates from our own site, runs your own BlackOps3.exe, and offers the compatible game executable (checked, backed up) when yours does not match.' -Recommended))
-            Note = 'CodHQ BOIII is our own build of the community client, updated from our own site. It runs your own BlackOps3.exe: if that file is not the build it supports, the client offers to install the compatible one (checked by SHA-1 and PE checksum, your file kept as BlackOps3.exe.boiii_backup), and Steam''s Verify integrity restores the original.'
-            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii-codhq')))
+            Note = 'CodHQ BOIII is our own build of the community client, updated from our own site. It runs your own BlackOps3.exe: if that file is not the build it supports, the client offers to install the compatible one (checked by SHA-1 and PE checksum, your file kept as BlackOps3.exe.boiii_backup), and Steam''s Verify integrity restores the original. First time: open the BOIII launcher once to set your player name and launch options; Play starts the game straight away.'
+            # Play starts the game the way the client's own Play button does (-launch), and
+            # the launcher mode starts the client with no arguments so the player can set
+            # the name, the launch options and the patches. The client has no -name
+            # argument: the name lives in its own profile, so neither mode passes one.
+            Modes = @((New-CatalogMode 'play' 'Play' -Exe 'boiii.exe' -Clients @('boiii-codhq') -UseName $false),
+                (New-CatalogMode 'launcher' 'Open BOIII launcher' -Exe 'boiii.exe' -Clients @('boiii-codhq') -UseName $false -NoDefaultArguments $true))
             Available = $true; UnavailableReason = '' }
         [pscustomobject]@{ Id = 'iw'; Name = 'Call of Duty: Infinite Warfare'; Year = '2016'; SteamAppIds = @(292730); Detect = 'steam'
             ValidFiles = @('iw7_ship.exe'); NameArgument = '+set name'; DefaultArguments = '-noupdate'
@@ -3349,6 +3354,11 @@ function Get-MissingExecutableDependency {
     $systemDirs = @((Join-Path $env:WINDIR 'System32'), (Join-Path $env:WINDIR 'SysWOW64'), $env:WINDIR)
     foreach ($name in @(Get-ExecutableImportNames -Path $Executable)) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        # API set contracts (api-ms-win-*, ext-ms-win-*) are resolved from the apiset
+        # schema by the loader, not from a file: Windows 11 has no
+        # api-ms-win-core-synch-l1-2-0.dll on disk and the client that imports it starts
+        # anyway, so counting one as missing blocked Play on a perfectly good install.
+        if ($name -like 'api-ms-win-*' -or $name -like 'ext-ms-win-*') { continue }
         $found = Test-Path -LiteralPath (Join-Path $folder $name) -PathType Leaf
         if (-not $found) {
             foreach ($dir in $systemDirs) { if ($dir -and (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf)) { $found = $true; break } }
@@ -5074,7 +5084,10 @@ function Get-GameBuildInfo {
     foreach ($recordFile in @(Get-ChildItem -LiteralPath $GameFolder -Filter '.codhq-client-*.json' -File -Force -ErrorAction SilentlyContinue)) {
         $record = $null
         try { $record = Get-Content -LiteralPath $recordFile.FullName -Raw | ConvertFrom-Json } catch { continue }
-        foreach ($expected in @($record.ExpectedGameFiles)) {
+        # A record from an older installer (or from the pinned-archive install) has no
+        # ExpectedGameFiles, and @($null) is one element: an empty Target would reach
+        # Test-Path as -LiteralPath '' and stop Play before it starts anything.
+        foreach ($expected in @($record.ExpectedGameFiles | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Target) })) {
             $target = [string]$expected.Target
             if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { $mismatches.Add([pscustomobject]@{ Client = [string]$record.ClientName; Path = [string]$expected.Path; Found = 'missing'; Expected = [string]$expected.Sha1 }); continue }
             if ((Get-Item -LiteralPath $target).Length -ne [int64]$expected.Size -or (Get-FileSha1Hex $target) -ne [string]$expected.Sha1) {

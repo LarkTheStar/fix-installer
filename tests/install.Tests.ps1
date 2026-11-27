@@ -1516,6 +1516,32 @@ Describe 'Game clients: install, update, remove' {
         $info.Mismatches[0].Path | Should -Be 'binkw32.dll'
     }
 
+    It 'reads an install record that has no expected game files instead of failing' {
+        $bo3Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('bo3-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $bo3Folder 'BlackOps3.exe') -Value 'retail'
+        $record = [pscustomobject]@{
+            Version = 1; GameId = 'bo3'; ClientId = 'boiii-codhq'; ClientName = 'CodHQ BOIII'
+            Files = @(); Backups = @(); CreatedDirs = @(); Snapshot = @()
+        }
+        [IO.File]::WriteAllText((Join-Path $bo3Folder '.codhq-client-boiii-codhq.json'), ($record | ConvertTo-Json -Depth 6))
+        $info = Get-GameBuildInfo -Game (Get-CatalogGame -Id 'bo3') -GameFolder $bo3Folder
+        $info.Executable | Should -Be 'BlackOps3.exe'
+        @($info.Mismatches).Count | Should -Be 0
+    }
+
+    It 'skips an expected game file that carries no target' {
+        $bo3Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('bo3-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Set-Content -LiteralPath (Join-Path $bo3Folder 'BlackOps3.exe') -Value 'retail'
+        $record = [pscustomobject]@{
+            Version = 1; GameId = 'bo3'; ClientId = 'boiii-codhq'; ClientName = 'CodHQ BOIII'
+            Files = @(); Backups = @(); CreatedDirs = @(); Snapshot = @()
+            ExpectedGameFiles = @([pscustomobject]@{ Path = 'BlackOps3.exe'; Size = 1; Sha1 = 'nope' })
+        }
+        [IO.File]::WriteAllText((Join-Path $bo3Folder '.codhq-client-boiii-codhq.json'), ($record | ConvertTo-Json -Depth 6))
+        $info = Get-GameBuildInfo -Game (Get-CatalogGame -Id 'bo3') -GameFolder $bo3Folder
+        @($info.Mismatches).Count | Should -Be 0
+    }
+
     It 'makes a renamed original from the player''s own file, backs up what it replaces and restores it on removal' {
         $cod4Folder = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('cod4-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
         Set-Content -LiteralPath (Join-Path $cod4Folder 'iw3mp.exe') -Value 'retail'
@@ -2842,6 +2868,15 @@ Describe 'Game clients: release archives, launchers and conflicts' {
         Copy-Item -LiteralPath $script:peSource -Destination (Join-Path $isolated 'game.exe')
         Mock Get-ExecutableImportNames { @('mss32.dll') }
         Get-ModeBlocker -Game $script:testGame -Mode $script:testGame.Modes[0] -GameFolder $isolated | Should -BeLike '*missing mss32.dll*Verify integrity*'
+    }
+
+    It 'does not count a Windows API set contract as a missing DLL' {
+        $apiset = (New-Item -ItemType Directory -Path (Join-Path $TestDrive ('apiset-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
+        Copy-Item -LiteralPath $script:peSource -Destination (Join-Path $apiset 'game.exe')
+        Mock Get-ExecutableImportNames { @('api-ms-win-core-synch-l1-2-0.dll', 'KERNEL32.dll') }
+        @(Get-MissingExecutableDependency -Executable (Join-Path $apiset 'game.exe')).Count | Should -Be 0
+        $script:testGame.Modes = @(New-CatalogMode 'sp' 'Campaign' -Exe 'game.exe')
+        Get-ModeBlocker -Game $script:testGame -Mode $script:testGame.Modes[0] -GameFolder $apiset | Should -Be ''
     }
 
     It 'backs up the files a launcher replaces and removes what it added, keeping the rest' {
